@@ -6,6 +6,7 @@ import { hashPassword } from "../utils/auth.js";
 import { clearAuthCache } from "../middleware/auth.js";
 import * as S from "../utils/leadService.js";
 import * as W from "../utils/waService.js";
+import { runSync } from "../utils/sheetSync.js";
 import { readFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 
@@ -29,7 +30,7 @@ const loadLead = async (id) => {
 router.get("/config", wrap(async (req, res) => {
   const c = await S.getCfg();
   res.json(req.lu.leadAdmin
-    ? { ...c, aisensy: W.aiCfg(c), lastSync: await S.lastSync(), integrations: { aisensyKey: W.keyIsSet(), razorpaySignature: !!process.env.RAZORPAY_WEBHOOK_SECRET, razorpayUrlSecret: !!process.env.INTAKE_SECRET } }
+    ? { ...c, aisensy: W.aiCfg(c), lastSync: await S.lastSync(), integrations: { aisensyKey: W.keyIsSet(), aisensyProblems: W.problems(c), razorpaySignature: !!process.env.RAZORPAY_WEBHOOK_SECRET, razorpayUrlSecret: !!process.env.INTAKE_SECRET } }
     : { statuses: c.statuses, plan: c.plan, attPlan: c.attPlan, waTemplate: c.waTemplate });
 }));
 router.put("/config", adminOnly, wrap(async (req, res) => {
@@ -66,14 +67,16 @@ router.post("/assign/spread-today", adminOnly, wrap(async (req, res) => res.json
 router.post("/assign/reshare", adminOnly, wrap(async (req, res) => res.json(await S.reshare(String(req.body?.queue || "")))));
 
 // ---------- intake sheet ----------
-router.post("/sync", adminOnly, wrap(async (req, res) => { const r = await S.syncIntake({ name: req.user.name, email: req.user.email }); S.pushSoon(); res.json(r); }));
+router.post("/sync", adminOnly, wrap(async (req, res) => { const r = await runSync({ name: req.user.name, email: req.user.email }); S.pushSoon(); res.json(r); }));
 // the import history shown in Settings: when, who, how many leads
 router.get("/import-log", adminOnly, wrap(async (_req, res) => res.json(await S.importLog(100))));
 // the Google Apps Script to paste into the sheet (Extensions -> Apps Script), with this site's secret key filled in
-router.get("/sheet-script", adminOnly, wrap(async (_req, res) => {
+router.get("/sheet-script", adminOnly, wrap(async (req, res) => {
   const c = await S.getCfg();
   if (!c.sheetToken) throw fail("Generate the secret key first, save settings, then copy the script");
-  const code = (await readFile(new URL("../sheet/Code.gs", import.meta.url), "utf8")).replace("__SECRET_KEY__", c.sheetToken);
+  // the address the sheet pings when a row arrives: this very server (PUBLIC_URL / Render's own URL, else the address the browser used)
+  const base = (process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || `${(req.get("x-forwarded-proto") || req.protocol).split(",")[0]}://${req.get("x-forwarded-host") || req.get("host")}`).replace(/\/$/, "");
+  const code = (await readFile(new URL("../sheet/Code.gs", import.meta.url), "utf8")).replace("__SECRET_KEY__", c.sheetToken).replace("__SYNC_URL__", `${base}/api/intake/sheet`);
   res.json({ code });
 }));
 router.post("/sheet-key", adminOnly, wrap(async (_req, res) => res.json({ token: randomBytes(18).toString("hex") })));
@@ -104,7 +107,7 @@ router.post("/leads", adminOnly, wrap(async (req, res) => {
   const ts = new Date(), A = await S.assigner("new", c), owner = b.assignedTo || A.pick();
   const story = [{ at: ts, type: "entered", text: "Lead added by " + req.user.name, by: req.user.name }];
   if (owner) story.push({ at: ts, type: "assign", text: `Assigned to ${owner} (${b.assignedTo ? "by " + req.user.name : "automatic"})`, by: b.assignedTo ? req.user.name : "System" });
-  const lead = await Lead.create({ key: phone, phone, name: b.name.trim(), email: b.email, city: b.city, profession: b.profession, level: b.level, workshop: S.cleanWorkshop(b.workshop), ts, assignedTo: owner, assignedBy: owner ? (b.assignedTo ? "manual" : "auto") : undefined, assignedAt: owner ? ts : undefined, locked: !!b.assignedTo, source: "manual", fus: S.planFor(ts, c), trail: story });
+  const lead = await Lead.create({ key: phone, phone, name: b.name.trim(), email: b.email, city: b.city, profession: b.profession, level: b.level, workshop: S.cleanWorkshop(b.workshop), ts, assignedTo: owner, assignedBy: owner ? (b.assignedTo ? "manual" : "auto") : undefined, assignedAt: owner ? ts : undefined, locked: !!b.assignedTo, source: "manual", fus: S.planNew(ts, c), trail: story });
   await A.save();
   res.json(S.plain(lead));
 }));
@@ -177,7 +180,7 @@ router.patch("/leads/:id/fu/:n", wrap(async (req, res) => {
   if (b.status) await S.logAct(l, n, f, req.user.email, set);
   S.bustProgress();
   // AiSensy: the first time one of the lead's own calls is saved as "Connected", WhatsApp the welcome message
-  const ai = W.aiCfg(cfg), sendWelcome = set === "fus" && ai.enabled && !!b.status && b.status === ai.triggerStatus && !l.waWelcomeAt;
+  const ai = W.aiCfg(cfg), sendWelcome = set === "fus" && ai.enabled && ai.trigger === "status" && !!b.status && b.status === ai.triggerStatus && !l.waWelcomeAt;
   res.json(S.plain(l));
   if (detailsChanged) S.pushSoon(); // write to the Google Sheet in the background — never slows the caller down
   if (sendWelcome) W.welcomeSoon(l._id, { callerName: req.lu.leadAdmin ? l.assignedTo || S.leadCallerName(req.user) : S.leadCallerName(req.user), by: req.user.name });

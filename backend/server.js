@@ -9,6 +9,7 @@ import leadRoutes from "./routes/leads.js";
 import intakeRoutes from "./routes/intake.js";
 import { requireAuth } from "./middleware/auth.js";
 import { startJobs } from "./utils/leadService.js";
+import { startSheetJobs } from "./utils/sheetSync.js";
 
 const app = express();
 
@@ -49,6 +50,7 @@ mongoose
     app.listen(PORT, () => console.log(`Lead FMS API running on port ${PORT}`));
     startKeepAlive();
     startJobs();
+    startSheetJobs();
   })
   .catch((err) => {
     console.error("MongoDB connection error:", err.message);

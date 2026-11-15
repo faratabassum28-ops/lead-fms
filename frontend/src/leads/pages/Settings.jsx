@@ -69,7 +69,7 @@ function Form({ cfg, load, sync, toast, leads }) {
         </p>
         <div className="ld-steps">
           <div><b>1.</b> Make a secret key <button type="button" className="ld-btn" onClick={newKey}>🔑 Generate key</button> then <b>Save settings</b>.</div>
-          <div><b>2.</b> In your Google Sheet open <i>Extensions → Apps Script</i>, paste the script, run <code>setupSheet</code> once, then <i>Deploy → New deployment → Web app</i> (Execute as <i>Me</i>, access <i>Anyone</i>).
+          <div><b>2.</b> In your Google Sheet open <i>Extensions → Apps Script</i>, paste the script, run <code>setupSheet</code> once, then run <code>setupInstantSync</code> once (new rows then reach this website within seconds), then <i>Deploy → New deployment → Web app</i> (Execute as <i>Me</i>, access <i>Anyone</i>).
             <div className="ld-actions" style={{ marginTop: 8 }}><button type="button" className="ld-btn" disabled={!cfg.sheetToken} onClick={copyScript}>📋 Copy Apps Script</button></div></div>
           <div><b>3.</b> Paste the Web app URL below, save, and press <b>Test connection</b>.</div>
         </div>
@@ -80,7 +80,7 @@ function Form({ cfg, load, sync, toast, leads }) {
         {test && <div className={"ld-callout " + (test.ok ? "good" : "bad")}>{test.ok
           ? <>✅ Connected — {test.leadsInSheet} lead rows found.{test.missing.length > 0 && <> Missing columns: <b>{test.missing.join(", ")}</b>.</>}</>
           : <>⚠ {test.error}</>}</div>}
-        {cfg.lastSync && <p className="ld-small">Last import: {fmt(cfg.lastSync.at)} — {cfg.lastSync.ok ? `${cfg.lastSync.added} new, ${cfg.lastSync.updated} updated` : <span className="ld-bad">{cfg.lastSync.error}</span>}. The site checks the sheet every 5 minutes; new rows never duplicate (a lead is matched by phone number, or by email if the phone is new) and blank cells never erase data.</p>}
+        {cfg.lastSync && <p className="ld-small">Last import: {fmt(cfg.lastSync.at)} — {cfg.lastSync.ok ? `${cfg.lastSync.added} new, ${cfg.lastSync.updated} updated` : <span className="ld-bad">{cfg.lastSync.error}</span>}. New rows arrive within seconds (and the site checks the sheet every minute as a backup); every new lead starts in <b>FU1, due now</b>; new rows never duplicate (a lead is matched by phone number, or by email if the phone is new) and blank cells never erase data.</p>}
         <p className="ld-small">Leads with a blank “Assigned To” are shared out by the <b>Automatic assignment</b> panel below.</p>
         <div className="ld-actions" style={{ marginTop: 12 }}>
           <button type="button" className="ld-btn" disabled={saving} onClick={runTest}>Test connection</button>
@@ -260,7 +260,7 @@ function AssignPanel({ c, setC, leads, saving, onReshare }) {
 // ---------------------------------------------------------------------------
 const WA_PILL = { sent: "ld-pill-done", failed: "ld-pill-over", skipped: "ld-pill-wait" };
 function WhatsAppPanel({ c, setC, cfg, statuses, toast, saving }) {
-  const a = c.aisensy || {}, keyOk = cfg.integrations?.aisensyKey;
+  const a = c.aisensy || {}, keyOk = cfg.integrations?.aisensyKey, problems = cfg.integrations?.aisensyProblems || [];
   const set = (patch) => setC({ ...c, aisensy: { ...a, ...patch } });
   const [log, setLog] = useState(null), [phone, setPhone] = useState(""), [testing, setTesting] = useState(false);
   const loadLog = useCallback(() => api.ldWaLog().then(setLog).catch(() => setLog([])), []);
@@ -276,18 +276,26 @@ function WhatsAppPanel({ c, setC, cfg, statuses, toast, saving }) {
   return (
     <Panel title="💬 WhatsApp welcome message (AiSensy)">
       <p className="ld-small" style={{ marginTop: 0 }}>
-        When a caller saves a call as <b>{a.triggerStatus || "Connected"}</b>, the lead automatically gets the “We just connected — congratulations on signing up” WhatsApp.
+        {(a.trigger || "status") === "arrival" ? <>As soon as a new lead arrives in the sheet</> : <>When a caller saves a call as <b>{a.triggerStatus || "Connected"}</b></>}, the lead automatically gets the “We just connected — congratulations on signing up” WhatsApp.
         It is sent <b>once per lead</b>, and every attempt is listed below.
       </p>
       <div className={"ld-callout " + (keyOk ? "good" : "bad")}>
         {keyOk ? "✅ AiSensy API key found on the server." : <>⚠ The AiSensy API key is not set on the server. Add <code>AISENSY_API_KEY</code> in Render → Environment (AiSensy → Manage → API Key) and redeploy.</>}
       </div>
+      {!!problems.length && <div className="ld-callout bad">⚠ Not ready to send yet (as last saved):<ul style={{ margin: "6px 0 0 18px" }}>{problems.map((p) => <li key={p}>{p}</li>)}</ul></div>}
+      {!problems.length && <div className="ld-callout good">✅ Everything is set — the welcome message will go out automatically.</div>}
       <Check checked={!!a.enabled} onChange={(v) => set({ enabled: v })}>Send the welcome message automatically</Check>
-      <Field label="Send when a call is saved as" hint="Only the lead's own follow-ups (FU1, FU2…) count — not Day 1 / Day 2 attendee calls.">
+      <Field label="Send when" hint="“A call is saved…” sends after the caller talks to the lead. “A new lead arrives” sends within a minute of the lead landing in the sheet. Either way: once per lead, and a failed send is retried automatically for 24 hours.">
+        <select className="ld-input ld-narrow" value={a.trigger || "status"} onChange={(e) => set({ trigger: e.target.value })}>
+          <option value="status">A call is saved with the status below</option>
+          <option value="arrival">A new lead arrives in the sheet</option>
+        </select>
+      </Field>
+      {(a.trigger || "status") === "status" && <Field label="Send when a call is saved as" hint="Only the lead's own follow-ups (FU1, FU2…) count — not Day 1 / Day 2 attendee calls.">
         <select className="ld-input ld-narrow" value={a.triggerStatus || "Connected"} onChange={(e) => set({ triggerStatus: e.target.value })}>
           {[...new Set([a.triggerStatus || "Connected", ...statuses])].map((x) => <option key={x}>{x}</option>)}
         </select>
-      </Field>
+      </Field>}
       <Field label="AiSensy campaign name" hint="AiSensy → Campaigns → your API campaign (it must be Live). Copy its name exactly.">
         <input className="ld-input" value={a.campaignName || ""} onChange={(e) => set({ campaignName: e.target.value })} placeholder="e.g. tarot_workshop_welcome" />
       </Field>

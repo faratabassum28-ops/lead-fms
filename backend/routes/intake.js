@@ -1,6 +1,9 @@
 import express from "express";
 import { HANDLED_EVENTS, parseEvent, verifySignature, verifyUrlSecret } from "../utils/razorpay.js";
 import { processPayment } from "../utils/paymentService.js";
+import { getCfg } from "../utils/leadService.js";
+import { syncSoon } from "../utils/sheetSync.js";
+import { timingSafeEqual } from "node:crypto";
 
 // PUBLIC (mounted in server.js BEFORE requireAuth) — Razorpay cannot log in, so the request itself is the proof:
 //   1. X-Razorpay-Signature  = HMAC-SHA256 of the raw body with RAZORPAY_WEBHOOK_SECRET (the secret typed in the Razorpay dashboard)
@@ -40,5 +43,22 @@ router.post("/payment", async (req, res) => {
     res.status(500).json({ error: "Could not save the payment" });
   }
 });
+
+// The Google Sheet pings this the moment a row is added or changed (installed by `setupInstantSync` in the Apps Script),
+// so a new lead shows up on the website within seconds instead of waiting for the next 1-minute check.
+// Proof = the sheet's secret key (the same one the script already uses), sent as ?token=…  It only ever starts an import
+// of the sheet the website is already connected to — it carries no data, so there is nothing to forge or inject.
+const same = (a, b) => { const x = Buffer.from(String(a)), y = Buffer.from(String(b)); return x.length === y.length && timingSafeEqual(x, y); };
+const sheetPing = async (req, res) => {
+  try {
+    const cfg = await getCfg(), token = String(req.query.token || req.body?.token || "");
+    if (!cfg.sheetToken) return res.status(503).json({ error: "Sheet is not connected on the website yet" });
+    if (!token || !same(token, cfg.sheetToken)) return res.status(401).json({ error: "Bad token" });
+    syncSoon();
+    res.json({ ok: true, queued: true });
+  } catch (e) { res.status(500).json({ error: "Could not start the import" }); }
+};
+router.get("/sheet", sheetPing);
+router.post("/sheet", sheetPing);
 
 export default router;

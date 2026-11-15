@@ -3,7 +3,7 @@
 //   { apiKey, campaignName, destination, userName, source, templateParams: [...] }
 // templateParams must have EXACTLY as many entries as the approved template has {{n}} variables, otherwise AiSensy rejects it.
 
-export const ENDPOINT = "https://backend.aisensy.com/campaign/t1/api/v2";
+export const ENDPOINT = process.env.AISENSY_ENDPOINT || "https://backend.aisensy.com/campaign/t1/api/v2"; // (the override exists only so tests can point at a fake server)
 
 // AiSensy wants the number with its country code: +919876543210. A bare 10-digit number is taken as Indian.
 export function destinationFor(phone) {
@@ -28,6 +28,8 @@ export const buildBody = ({ apiKey, campaignName, phone, name, params, tags }) =
   source: "lead-fms", templateParams: params, ...(tags?.length ? { tags } : {}),
 });
 
+// AiSensy can answer HTTP 200 and still say it did not send: {"success":"false","message":"…"}
+const rejected = (txt) => { try { const j = JSON.parse(txt); return j && (j.success === false || String(j.success).toLowerCase() === "false"); } catch { return false; } };
 const snippet = (t) => String(t ?? "").replace(/\s+/g, " ").trim().slice(0, 300);
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -39,7 +41,7 @@ export async function postCampaign(body, { fetchImpl = fetch, delayMs = 1500 } =
     try {
       const res = await fetchImpl(ENDPOINT, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: ctrl.signal });
       const txt = await res.text();
-      last = { ok: res.ok, status: res.status, body: snippet(txt) };
+      last = { ok: res.ok && !rejected(txt), status: res.status, body: snippet(txt) };
       if (res.ok || (res.status !== 429 && res.status < 500)) return last; // success, or a request problem retrying cannot fix
     } catch (e) {
       last = { ok: false, status: 0, body: e?.name === "AbortError" ? "AiSensy took longer than 20 seconds to answer" : `Could not reach AiSensy (${e?.cause?.code || e?.message || "network error"})` };

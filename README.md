@@ -71,12 +71,13 @@ npm run seed -- --reset   # re-import only the leads that came from the import
 | Timestamp · Lead Name · Lead Email · Lead Phone · UTW Date · Assigned To · **Workshop Name** | Level · Profession · City |
 
 1. **One-time connection** (Settings → *Google Sheet ↔ website*): generate a secret key → save → *Copy Apps Script* →
-   in the sheet open *Extensions → Apps Script*, paste, run `setupSheet` once (it sets up **every lead tab**), *Deploy → Web app* (Execute as *Me*,
+   in the sheet open *Extensions → Apps Script*, paste, run `setupSheet` once (it sets up **every lead tab**), then run `setupInstantSync` once (installs the "row added" trigger), *Deploy → Web app* (Execute as *Me*,
    access *Anyone*) → paste the Web app URL in Settings → *Test connection*. The sheet stays **private**; only that URL
    plus the secret key can read it. (Script source: `backend/sheet/Code.gs`.)
    **All tabs are read:** any tab with a `Lead Name` + `Lead Phone` header row (columns may be in any order). Tabs starting with `_`, hidden tabs and tabs without those headers are ignored; run `checkTabs` in Apps Script to see which. Level / Profession / City are written back into the tab the lead is in.
-2. Each morning the person adds rows. The server imports every 5 minutes (or press **Import from sheet**), plans
-   Follow-up 1/2/3 and shows them on the assigned caller's **Today Follow-ups**. Re-import never duplicates (a lead is matched by phone, then by email — the sheet overwrites what it finds),
+2. The moment a row is added to the sheet it is pushed to the website (Apps Script trigger → `/api/intake/sheet`, a few seconds), with a
+   1-minute check as the safety net (or press **Import from sheet**). **Every new lead starts in FU1, due now**, on the assigned caller's **Today Follow-ups**
+   (FU2/FU3 are planned from the moment it arrived; rows older than 7 days keep their own timeline). Re-import never duplicates (a lead is matched by phone, then by email — the sheet overwrites what it finds),
    and blank cells never wipe existing data. Blank *Assigned To* = auto-assigned.
 3. A caller taps **Call / WhatsApp**, then **Update status** — picks the outcome, adds Level / Profession / City and a note.
    Level / Profession / City are written back to the **same row** of the Google Sheet within seconds
@@ -161,6 +162,8 @@ When a caller saves one of a lead’s own calls (FU1, FU2…) as **Connected**, 
 1. AiSensy: create/approve the template with **4 variables** — `{{1}}` first name · `{{2}}` caller · `{{3}}` workshop start date & time · `{{4}}` community / Zoom link — then *Campaigns → + Launch → API Campaign*, pick that template and set it **Live**.
 2. Render → Environment: `AISENSY_API_KEY` (AiSensy → Manage → API Key), redeploy.
 3. Website → **Settings → WhatsApp welcome message**: paste the campaign name, the workshop start date/time and the community link, tick *Send automatically*, **Save settings**, then **Send a test message** to your own number.
+
+**Send when** (Settings): *a call is saved with the status* (default Connected) **or** *a new lead arrives in the sheet* (within a minute; only leads that came in during the last 24 h). The Settings panel lists exactly what is still missing (API key, campaign, link, start time). A send that fails (AiSensy down, or HTTP 200 with `success:false`) stays pending and is retried automatically after 1, 2, 4, 8 min (5 tries, 24 h); welcomes go out one at a time so AiSensy's rate limit is never hit.
 
 Behaviour: sent **once per lead** (two quick saves can’t double-send); the trigger status is configurable; optional *only message paid leads*; if a variable would be empty (e.g. no community link yet) nothing is sent and the reason is logged instead of sending a broken message; a failed send is retried automatically by the next Connected save, or by an admin with **Send / Resend welcome WhatsApp** in the lead drawer. Every attempt appears in the **Message log** (Settings) and sent ones in the lead’s history. The API key stays on the server.
 

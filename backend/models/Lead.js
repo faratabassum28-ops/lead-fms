@@ -47,6 +47,8 @@ const LeadSchema = new Schema(
     nameGuess: Boolean, // the name was guessed from the email — a later event with the real name replaces it
     // AiSensy: the "we just connected" WhatsApp is sent once per lead
     waWelcomeAt: Date,
+    waPendingAt: { type: Date, index: true }, // a welcome is due but not delivered yet (the background job retries it for 24 h)
+    waTries: Number, waTriedAt: Date, // failed attempts so far, and when the last one was
     day1: Boolean, // attended Day 1
     day2: Boolean,
     fus: [Fu], // Lead Qualification follow-ups 1..3

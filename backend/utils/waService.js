@@ -1,6 +1,6 @@
 import { Lead, WaMessage } from "../models/Lead.js";
 import * as S from "./leadService.js";
-import { buildBody, postCampaign, welcomeParams } from "./aisensy.js";
+import { buildBody, destinationFor, postCampaign, welcomeParams } from "./aisensy.js";
 
 // "We just connected" WhatsApp, sent through AiSensy the first time a lead's call is saved as Connected.
 //   • The API key lives ONLY in the server's environment (AISENSY_API_KEY) — never in the database or the browser.
@@ -9,7 +9,8 @@ import { buildBody, postCampaign, welcomeParams } from "./aisensy.js";
 //     if the send fails the claim is released so the next Connected save (or the admin's Resend) tries again.
 //   • Every attempt — sent, failed or skipped — is written to the WhatsApp log (Settings), and sent ones to the lead's history.
 
-const AI_DEF = { enabled: false, campaignName: "", triggerStatus: "Connected", startText: "", communityLink: "", onlyPaid: false };
+const AI_DEF = { enabled: false, trigger: "status", campaignName: "", triggerStatus: "Connected", startText: "", communityLink: "", onlyPaid: false };
+// trigger: "status" = when a caller saves the call as triggerStatus (default)  ·  "arrival" = the moment a new lead comes in
 export const aiCfg = (cfg) => ({ ...AI_DEF, ...(cfg?.aisensy || {}) });
 
 const fail = (msg, status = 400) => Object.assign(new Error(msg), { status });
@@ -18,7 +19,7 @@ const clip = (v, n) => String(v ?? "").trim().slice(0, n);
 // validate what the admin saved in Settings
 export function cleanAisensy(a = {}) {
   const out = {
-    enabled: !!a.enabled, campaignName: clip(a.campaignName, 80), triggerStatus: clip(a.triggerStatus, 40) || "Connected",
+    enabled: !!a.enabled, trigger: a.trigger === "arrival" ? "arrival" : "status", campaignName: clip(a.campaignName, 80), triggerStatus: clip(a.triggerStatus, 40) || "Connected",
     startText: clip(a.startText, 120), communityLink: clip(a.communityLink, 300), onlyPaid: !!a.onlyPaid,
   };
   if (out.communityLink && !/^https?:\/\/\S+$/i.test(out.communityLink)) throw fail("The community / Zoom link must start with https://");
@@ -27,6 +28,16 @@ export function cleanAisensy(a = {}) {
 }
 
 export const keyIsSet = () => !!process.env.AISENSY_API_KEY;
+// What is still missing before a welcome can go out — shown in Settings so a silent "not working" is never a mystery.
+export function problems(cfg) {
+  const a = aiCfg(cfg), out = [];
+  if (!keyIsSet()) out.push("AISENSY_API_KEY is not set on the server (Render → Environment), then redeploy");
+  if (!a.enabled) out.push("“Send the welcome message automatically” is switched off");
+  if (!a.campaignName) out.push("AiSensy campaign name is empty");
+  if (!a.communityLink) out.push("Community / Zoom link is empty");
+  if (!a.startText) out.push("Workshop start date & time is empty (each lead’s own UTW Date is used instead — leads without one are skipped)");
+  return out;
+}
 export const waLog = (limit = 100) => WaMessage.find().sort({ at: -1 }).limit(limit).lean();
 const record = (v) => WaMessage.create({ at: new Date(), ...v }).catch((e) => console.error("[whatsapp] log failed:", e.message));
 
@@ -41,19 +52,21 @@ async function deliver({ a, phone, name, params }) {
 
 // callerName = who the lead is talking to ({{2}} in the template)
 // force = an admin pressed "Resend" — ignores "already sent" and the on/off switch
-export async function sendWelcome(leadId, { callerName = "", by = "System", force = false } = {}) {
+// quiet = a background retry: skips are not written to the log again (only real sends and failures are)
+export async function sendWelcome(leadId, { callerName = "", by = "System", force = false, quiet = false } = {}) {
   const a = aiCfg(await S.getCfg());
   if (!force && !a.enabled) return { status: "skipped", reason: "WhatsApp message is switched off in Settings" };
   const lead = await Lead.findById(leadId);
   if (!lead) throw fail("Lead not found", 404);
   const base = { kind: "welcome", leadId: String(lead._id), leadKey: lead.key, name: lead.name, phone: lead.phone, campaign: a.campaignName, by };
-  const skip = async (reason) => { await record({ ...base, status: "skipped", error: reason }); return { status: "skipped", reason }; };
+  const skip = async (reason) => { if (!quiet) await record({ ...base, status: "skipped", error: reason }); return { status: "skipped", reason }; };
 
   if (!force && lead.waWelcomeAt) return { status: "skipped", reason: "Already sent to this lead" };
   if (a.onlyPaid && !lead.paid && !force) return skip("Skipped — “only message paid leads” is on and this lead has not paid");
-  const params = welcomeParams({ name: lead.name, caller: callerName || lead.assignedTo, start: a.startText || lead.utwDate, link: a.communityLink });
-  if (params.some((p) => !p)) return skip("Skipped — fill in the caller, the workshop start date & time and the community link (Settings → WhatsApp)");
-  if (!lead.phone) return skip("Skipped — this lead has no phone number");
+  // an unassigned lead still gets the message — signed by the team instead of silently never being sent
+  const params = welcomeParams({ name: lead.name, caller: callerName || lead.assignedTo || "My Soul School team", start: a.startText || lead.utwDate, link: a.communityLink });
+  if (params.some((p) => !p)) return skip("Skipped — fill in the workshop start date & time and the community link (Settings → WhatsApp)");
+  if (destinationFor(lead.phone).length < 11) return skip("Skipped — this lead has no valid phone number");
 
   // claim: only one request may send for this lead
   const before = lead.waWelcomeAt || null;
@@ -63,18 +76,55 @@ export async function sendWelcome(leadId, { callerName = "", by = "System", forc
   const r = await deliver({ a, phone: lead.phone, name: lead.name, params });
   if (r.ok) {
     await record({ ...base, status: "sent", params, response: r.response });
-    await Lead.updateOne({ _id: lead._id }, { $push: { trail: S.trailOp("whatsapp", `Welcome WhatsApp sent via AiSensy (by ${by})`, "AiSensy") } });
+    await Lead.updateOne({ _id: lead._id }, { $unset: { waPendingAt: 1, waTriedAt: 1 }, $set: { waTries: 0 }, $push: { trail: S.trailOp("whatsapp", `Welcome WhatsApp sent via AiSensy (by ${by})`, "AiSensy") } });
     return { status: "sent" };
   }
-  // release the claim so it can be retried
-  await Lead.updateOne({ _id: lead._id }, before ? { $set: { waWelcomeAt: before } } : { $unset: { waWelcomeAt: 1 } });
+  // release the claim, remember the attempt: the background job tries again (see retryPending)
+  await Lead.updateOne({ _id: lead._id }, { ...(before ? { $set: { waWelcomeAt: before } } : { $unset: { waWelcomeAt: 1 } }), $inc: { waTries: 1 } });
+  await Lead.updateOne({ _id: lead._id }, { $set: { waTriedAt: new Date() }, $push: { trail: S.trailOp("whatsapp", `Welcome WhatsApp could not be sent: ${r.error}`, "AiSensy") } });
   await record({ ...base, status: "failed", params, error: r.error });
-  await Lead.updateOne({ _id: lead._id }, { $push: { trail: S.trailOp("whatsapp", `Welcome WhatsApp could not be sent: ${r.error}`, "AiSensy") } });
   return { status: "failed", reason: r.error };
 }
 
+// ---- sending one at a time -------------------------------------------------------------------------------------------
+// AiSensy rate-limits bursts (a 50-row paste would fire 50 requests at once), so welcomes go out one after another.
+let chain = Promise.resolve();
+const enqueue = (fn) => { const run = chain.then(fn, fn); chain = run.then(() => wait(400), () => wait(400)); return run; };
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// A welcome is DUE for this lead (trigger fired). It is remembered as pending, so if AiSensy is down for a minute or a
+// setting is still missing, the background job sends it later — for up to 24 hours — instead of it being lost.
+export async function triggerWelcome(leadId, opts = {}) {
+  await Lead.updateOne({ _id: leadId, waWelcomeAt: null }, { $set: { waPendingAt: new Date(), waTries: 0 }, $unset: { waTriedAt: 1 } });
+  return enqueue(() => sendWelcome(leadId, opts));
+}
 // fire-and-forget: never slows the caller down and never throws
-export const welcomeSoon = (leadId, opts) => sendWelcome(leadId, opts).catch((e) => console.error("[whatsapp] welcome failed:", e.message));
+export const welcomeSoon = (leadId, opts) => triggerWelcome(leadId, opts).catch((e) => console.error("[whatsapp] welcome failed:", e.message));
+
+// "As soon as a new lead arrives" mode (Settings → WhatsApp → Send when)
+export async function arrivalWelcome(leadId, owner = "") {
+  try {
+    const a = aiCfg(await S.getCfg());
+    if (a.enabled && a.trigger === "arrival") await welcomeSoon(leadId, { callerName: owner, by: "System" });
+  } catch (e) { console.error("[whatsapp] arrival welcome failed:", e.message); }
+}
+
+const MAX_TRIES = 5, WINDOW_MS = 24 * 36e5;
+// every minute: send the welcomes that are due but not delivered yet (failed send, missing setting that is now filled in)
+export async function retryPending() {
+  const a = aiCfg(await S.getCfg());
+  if (!a.enabled) return { retried: 0 };
+  const now = Date.now();
+  const due = await Lead.find({ waWelcomeAt: null, waPendingAt: { $gt: new Date(now - WINDOW_MS) }, waTries: { $lt: MAX_TRIES } }).limit(20);
+  let retried = 0;
+  for (const l of due) {
+    // wait longer after each failure: 1, 2, 4, 8 minutes
+    if (l.waTriedAt && now - +l.waTriedAt < 60_000 * 2 ** Math.max(0, (l.waTries || 1) - 1)) continue;
+    retried++;
+    await enqueue(() => sendWelcome(l._id, { callerName: l.assignedTo, by: "System (retry)", quiet: true })).catch((e) => console.error("[whatsapp] retry failed:", e.message));
+  }
+  return { retried };
+}
 
 // Settings → "Send a test": same template and campaign, to any number, no lead involved
 export async function sendTest({ phone, name = "Test", callerName = "Team", by = "Admin" }) {

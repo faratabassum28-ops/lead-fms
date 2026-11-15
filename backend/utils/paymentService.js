@@ -70,7 +70,7 @@ async function apply(p) {
         key: m.phone, phone: m.phone, name: m.name, nameGuess: m.nameGuess, email: m.email, workshop: ws, ts: m.paidAt, source: "razorpay",
         paid: true, paidAt: m.paidAt, paidAmount: m.amount, payIds: [m.paymentId], payMethod: m.method,
         assignedTo: owner, assignedBy: owner ? "auto" : undefined, assignedAt: owner ? now : undefined,
-        fus: S.planFor(now, cfg), trail: story,
+        fus: S.planNew(now, cfg), trail: story,
       });
       await A.save();
       doc.outcome = "created";

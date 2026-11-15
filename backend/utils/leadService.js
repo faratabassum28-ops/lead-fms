@@ -85,8 +85,14 @@ export const normEmail = (e) => String(e || "").trim().toLowerCase();
 export const isEmail = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normEmail(e));
 export const byEmail = (e) => Lead.findOne({ emailKey: normEmail(e) });
 // older leads were saved before emailKey existed — fill it in once (cheap no-op afterwards)
-export const backfillEmailKeys = () =>
-  Lead.updateMany({ emailKey: { $exists: false }, email: { $exists: true, $nin: ["", null] } }, [{ $set: { emailKey: { $toLower: { $trim: { input: "$email" } } } } }]);
+// (new leads always get it from the save hook, so once per server start is enough — not on every 1-minute import)
+let emailKeysDone = false;
+export async function backfillEmailKeys() {
+  if (emailKeysDone) return;
+  emailKeysDone = true;
+  try { await Lead.updateMany({ emailKey: { $exists: false }, email: { $exists: true, $nin: ["", null] } }, [{ $set: { emailKey: { $toLower: { $trim: { input: "$email" } } } } }]); }
+  catch (e) { console.error("[leads] email-key backfill skipped:", e.message); }
+}
 
 // ---------------------------------------------------------------------------
 // Scheduling
@@ -108,6 +114,15 @@ export const planFor = (ts, cfg, plan = cfg.plan) =>
     return { planned: adj(U(l), cfg) };
   });
 export const attFus = (cfg) => planFor(new Date(), cfg, cfg.attPlan);
+
+// A lead that has JUST arrived (sheet row, manual add, payment) starts in FU1 immediately: FU1 is due right now — not
+// "16:00 today", and not pushed to Monday because it arrived on a Sunday or after working hours — and the later
+// follow-ups are planned from the moment it arrived. Only a stale row (older than 7 days, e.g. history pasted into the
+// sheet) keeps the old behaviour of planning from its own timestamp.
+export function planNew(ts, cfg, now = new Date()) {
+  if (ts && now - new Date(ts) > 7 * 864e5) return planFor(ts, cfg);
+  return planFor(now, cfg).map((p, i) => (i === 0 ? { planned: now } : { planned: p.planned < now ? adj(now, cfg) : p.planned }));
+}
 
 // ---------------------------------------------------------------------------
 // Follow-up plans can hold up to MAX_FU steps. When admins ADD a step in Settings, every existing lead
@@ -406,8 +421,11 @@ export async function syncIntake(by = null) {
 
     const A = await assigner("new", cfg);
     let added = 0, updated = 0, byEmailMatched = 0;
+    const newLeads = []; // leads created by THIS import (used to send the arrival WhatsApp)
     const touched = new Set(); // leads already handled in this import
+    const rowErrors = [];
     for (const { r, phone } of data) {
+     try { // one bad row must never stop the other leads from arriving
       const f = { name: cell(r, ix.name), email: cell(r, ix.email), utwDate: cell(r, ix.utw), level: cell(r, ix.lvl), profession: cell(r, ix.pro), city: cell(r, ix.city), workshop: canonWs(cell(r, ix.ws)) };
       const sheetAsg = cell(r, ix.asg), ten = phone.slice(-10), mail = normEmail(f.email);
       // same phone -> same lead; otherwise the same email -> same lead (its phone is then corrected from the sheet)
@@ -437,19 +455,20 @@ export async function syncIntake(by = null) {
         const autoName = sheetAsg ? "" : A.pick(), owner = sheetAsg || autoName;
         const story = [{ at: new Date(), type: "entered", text: `Lead came in from the sheet${f.workshop ? " · " + f.workshop : ""}`, by: "System" }];
         if (owner) story.push({ at: new Date(), type: "assign", text: `Assigned to ${owner} (${sheetAsg ? "from the sheet" : "automatic"})`, by: "System" });
-        const lead = await Lead.create({ ...f, key: phone, phone, ts, source: "sheet", assignedTo: owner, assignedBy: owner ? (sheetAsg ? "sheet" : "auto") : undefined, assignedAt: owner ? new Date() : undefined, fus: planFor(ts, cfg), trail: story });
+        const lead = await Lead.create({ ...f, key: phone, phone, ts, source: "sheet", assignedTo: owner, assignedBy: owner ? (sheetAsg ? "sheet" : "auto") : undefined, assignedAt: owner ? new Date() : undefined, fus: planNew(ts, cfg), trail: story });
         remember(lead); touched.add(lead);
-        added++;
+        added++; newLeads.push({ id: String(lead._id), owner, ts });
       }
+     } catch (e) { rowErrors.push(`${phone}: ${e.code === 11000 ? "duplicate phone number" : e.message}`); console.error("[sheet] row skipped:", phone, e.message); }
     }
     await A.save();
-    const res = { added, updated, byEmailMatched, rows: data.length, ok: true };
+    const res = { added, updated, byEmailMatched, rows: data.length, ok: true, ...(rowErrors.length ? { rowErrors: rowErrors.slice(0, 5), skippedRows: rowErrors.length } : {}) };
     await saveSync(res);
     // every click is logged; the silent 5-minute run only when it changed something (or when it is working again after failures)
     const back = prev && prev.ok === false && !by;
     if (by || added || updated || back)
-      await logImport({ ...who, ...res, note: back ? `Working again after ${prev.streak || 1} failed check${(prev.streak || 1) > 1 ? "s" : ""}` : tries > 1 ? `Google needed ${tries} tries` : undefined });
-    return { added, updated, byEmailMatched };
+      await logImport({ ...who, ...res, note: back ? `Working again after ${prev.streak || 1} failed check${(prev.streak || 1) > 1 ? "s" : ""}` : tries > 1 ? `Google needed ${tries} tries` : rowErrors.length ? `${rowErrors.length} row(s) skipped: ${rowErrors[0]}` : undefined });
+    return { added, updated, byEmailMatched, newLeads };
   } catch (e) {
     // the 5-minute run fails with the same message again and again while Google is down — log the first one, not every one
     const streak = prev && prev.ok === false && prev.error === e.message ? (prev.streak || 1) + 1 : 1;
@@ -591,8 +610,7 @@ export function startJobs() {
   getCfg().then(addStepsToExistingLeads).catch((e) => console.error("[leads] plan sync failed:", e.message));
   const timezone = process.env.TZ_NAME || "Asia/Kolkata";
   cron.schedule("55 23 * * *", () => snapshot().catch((e) => console.error("[leads] snapshot failed:", e.message)), { timezone }); // nightly snapshot, kept forever
-  // every 5 minutes: write any pending Level / Profession / City back to the sheet, then import new morning leads
-  cron.schedule("*/5 * * * *", async () => { await pushDirty().catch(() => {}); await syncIntake().catch(() => {}); await shareTick(); }); // (auto runs only reach the import log when they change something)
+  // the sheet import, write-back, daily share and WhatsApp retries run every minute — see startSheetJobs() in sheetSync.js
 }
 
 

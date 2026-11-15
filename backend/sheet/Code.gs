@@ -19,6 +19,8 @@
  *  1. In the Google Sheet:  Extensions -> Apps Script.  Delete what is there and paste this whole file.
  *  2. Press Save, then choose the function  setupSheet  and press Run (allow access when asked).
  *     It adds headers to empty tabs, greys out the three website columns, and keeps the Timestamp automatic.
+ *     THEN run  setupInstantSync  once (allow access again): from then on every new row reaches the website within
+ *     seconds (it also fills the Timestamp). Without it the website still checks the sheet every minute.
  *  3. Deploy -> New deployment -> type "Web app".
  *        Execute as:      Me
  *        Who has access:  Anyone
@@ -31,6 +33,7 @@
  */
 
 var SECRET_KEY = "__SECRET_KEY__";   // filled in for you by the website's "Copy Apps Script" button
+var SYNC_URL   = "__SYNC_URL__";     // the website's address for "a row just arrived" (also filled in by the button)
 var ONLY_TAB   = "";                 // leave empty = read every lead tab; or type one tab's name
 var TIME_ZONE  = "Asia/Kolkata";
 
@@ -281,11 +284,60 @@ function onEdit(e) {
   } catch (err) {}
 }
 
-// Run once by hand to stamp rows (in all lead tabs) that were added without a Timestamp.
-function fillMissingTimestamps() {
+// Stamp every lead tab (no pop-up) — used by the instant-sync trigger.
+function stampAll_() {
   leadTabs_().forEach(function (t) {
     var last = t.sheet.getLastRow(), phoneCol = findCol_(t.head, /phone/) + 1, tsCol = findCol_(t.head, /timestamp/) + 1;
     if (last >= t.hi + 2 && phoneCol && tsCol) stampRows_(t.sheet, t.hi + 2, last, phoneCol, tsCol);
   });
+}
+
+// Run once by hand to stamp rows (in all lead tabs) that were added without a Timestamp.
+function fillMissingTimestamps() {
+  stampAll_();
   SpreadsheetApp.getUi().alert("Timestamps filled ✅");
+}
+
+/* ------------------------------------------------------- instant sync */
+
+// Tell the website "something changed" so it imports right away. Never throws: if the website is asleep or busy,
+// its own 1-minute check picks the rows up anyway.
+function notifyWebsite_() {
+  if (!SYNC_URL || SYNC_URL.indexOf("__") === 0) return "SYNC_URL is not set — use the website's “Copy Apps Script” button again";
+  try {
+    var res = UrlFetchApp.fetch(SYNC_URL + "?token=" + encodeURIComponent(SECRET_KEY), { method: "post", muteHttpExceptions: true, followRedirects: true });
+    var code = res.getResponseCode();
+    return code === 200 ? "ok" : "website answered HTTP " + code + ": " + String(res.getContentText()).slice(0, 120);
+  } catch (err) { return "could not reach the website: " + err.message; }
+}
+
+// Runs by itself (installable trigger) whenever rows are added, pasted, edited or submitted from a form.
+function onSheetChange_(e) {
+  var lock = LockService.getScriptLock();
+  try {
+    if (!lock.tryLock(10000)) { notifyWebsite_(); return; }
+    try { stampAll_(); } catch (x) {}
+    SpreadsheetApp.flush();
+  } finally { try { lock.releaseLock(); } catch (y) {} }
+  notifyWebsite_();
+}
+
+// Run ONCE (and again only if you ever change the website address): installs the triggers.
+function setupInstantSync() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === "onSheetChange_") ScriptApp.deleteTrigger(t);   // re-running never stacks duplicates
+  });
+  ScriptApp.newTrigger("onSheetChange_").forSpreadsheet(ss).onChange().create();     // typed, pasted, rows added, API / Zapier (change type EDIT / INSERT_ROW / OTHER)
+  var form = ss.getFormUrl();
+  if (form) ScriptApp.newTrigger("onSheetChange_").forSpreadsheet(ss).onFormSubmit().create();   // Google Form responses
+  var r = notifyWebsite_();
+  SpreadsheetApp.getUi().alert(r === "ok"
+    ? "Instant sync is ON ✅\nNew rows now reach the website within seconds."
+    : "Triggers installed, but the website did not answer yet:\n" + r + "\n\nCheck the secret key in Settings and that the website is running, then run setupInstantSync again.");
+}
+
+// Run by hand to test: pings the website and shows the answer.
+function testWebsitePing() {
+  SpreadsheetApp.getUi().alert("Website answer: " + notifyWebsite_());
 }
