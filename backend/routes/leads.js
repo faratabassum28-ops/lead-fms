@@ -162,6 +162,7 @@ router.patch("/leads/:id/fu/:n", wrap(async (req, res) => {
     if (v !== (l[k] || "")) { l[k] = v; detailsChanged = true; }
   }
   if (detailsChanged) { l.sheetDirty = true; S.trail(l, "details", `Details updated: ${["level", "profession", "city"].map((k) => l[k] && `${k[0].toUpperCase() + k.slice(1)} ${l[k]}`).filter(Boolean).join(" · ")}`, req.user.name); }
+  if (set === "fus" && b.status === "Connected" && l.callStatus !== "Connected") { l.callStatus = "Connected"; l.sheetDirty = true; } // -> the sheet's Call Status column
   f.status = b.status || undefined;
   f.note = b.note || "";
   f.callbackAt = b.callbackAt ? new Date(b.callbackAt) : undefined;

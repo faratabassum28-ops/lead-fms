@@ -373,7 +373,7 @@ export async function pushDirty() {
     if (!sheetOn(cfg)) return { pushed: 0, skipped: true };
     const leads = await Lead.find({ sheetDirty: true }).limit(300);
     if (!leads.length) return { pushed: 0 };
-    const updates = leads.map((l) => ({ phone: l.phone10 || l.phone, level: l.level || "", profession: l.profession || "", city: l.city || "" }));
+    const updates = leads.map((l) => ({ phone: l.phone10 || l.phone, level: l.level || "", profession: l.profession || "", city: l.city || "", callStatus: l.callStatus || "", msgSent: l.msgSent || "" }));
     const r = await scriptCall(cfg, { action: "write", updates });
     // rows the script could not find (lead was not typed in the sheet, e.g. added manually) are not retried forever
     await Lead.updateMany({ _id: { $in: leads.map((l) => l._id) } }, { sheetDirty: false });
@@ -398,7 +398,7 @@ export async function syncIntake(by = null) {
     if (hi < 0) throw new Error("No header row containing 'Lead Phone'");
     const H = rows[hi].map((h) => String(h).trim().toLowerCase()), col = (re) => H.findIndex((h) => re.test(h));
     // "Workshop Name" also contains "name" — the lead's name column is the one that is NOT the workshop
-    const ix = { ts: col(/timestamp/), name: col(/^(?!.*workshop).*name/), email: col(/email/), phone: col(/phone/), utw: col(/utw/), asg: col(/assigned/), ws: col(/workshop/), lvl: col(/level/), pro: col(/profession/), city: col(/city/) };
+    const ix = { ts: col(/timestamp/), name: col(/^(?!.*workshop).*name/), email: col(/email/), phone: col(/phone/), utw: col(/utw/), asg: col(/assigned/), ws: col(/workshop/), lvl: col(/level/), pro: col(/profession/), city: col(/city/), link: col(/whatsapp.*link/), sent: col(/msg.*sent/) };
     const cell = (r, i) => (i >= 0 ? String(r[i] ?? "").trim() : "");
 
     const data = rows.slice(hi + 1).map((r) => ({ r, phone: cell(r, ix.phone).replace(/\D/g, "") })).filter((x) => x.phone);
@@ -426,7 +426,8 @@ export async function syncIntake(by = null) {
     const rowErrors = [];
     for (const { r, phone } of data) {
      try { // one bad row must never stop the other leads from arriving
-      const f = { name: cell(r, ix.name), email: cell(r, ix.email), utwDate: cell(r, ix.utw), level: cell(r, ix.lvl), profession: cell(r, ix.pro), city: cell(r, ix.city), workshop: canonWs(cell(r, ix.ws)) };
+      const f = { name: cell(r, ix.name), email: cell(r, ix.email), utwDate: cell(r, ix.utw), level: cell(r, ix.lvl), profession: cell(r, ix.pro), city: cell(r, ix.city), workshop: canonWs(cell(r, ix.ws)), waLink: cell(r, ix.link) };
+      const sentCell = cell(r, ix.sent); // "Sent …": a message (e.g. from Pabbly) already went out for this row — never send it again
       const sheetAsg = cell(r, ix.asg), ten = phone.slice(-10), mail = normEmail(f.email);
       // same phone -> same lead; otherwise the same email -> same lead (its phone is then corrected from the sheet)
       let ex = existing.get(ten), viaEmail = false;
@@ -441,6 +442,7 @@ export async function syncIntake(by = null) {
         // and what a caller just typed in the app is never overwritten by an older sheet value
         const wasWs = ex.workshop || "";
         Object.entries(f).forEach(([k, v]) => { if (v && !(ex.sheetDirty && ["level", "profession", "city"].includes(k))) ex[k] = v; });
+        if (sentCell && !ex.waWelcomeAt) { ex.waWelcomeAt = new Date(); ex.msgSent = sentCell; trail(ex, "whatsapp", `Welcome already sent (sheet says: ${sentCell}) — not sending again`, "Sheet"); }
         if (f.name && ex.nameGuess) ex.nameGuess = false; // the sheet gave the real name of a lead that a payment created with a guessed one
         if (f.workshop && f.workshop !== wasWs) trail(ex, "workshop", wasWs ? `Workshop changed from ${wasWs} to ${f.workshop} (sheet)` : `Workshop: ${f.workshop} (sheet)`);
         if (viaEmail && ex.phone10 !== ten) ex.phone = phone;
@@ -455,7 +457,7 @@ export async function syncIntake(by = null) {
         const autoName = sheetAsg ? "" : A.pick(), owner = sheetAsg || autoName;
         const story = [{ at: new Date(), type: "entered", text: `Lead came in from the sheet${f.workshop ? " · " + f.workshop : ""}`, by: "System" }];
         if (owner) story.push({ at: new Date(), type: "assign", text: `Assigned to ${owner} (${sheetAsg ? "from the sheet" : "automatic"})`, by: "System" });
-        const lead = await Lead.create({ ...f, key: phone, phone, ts, source: "sheet", assignedTo: owner, assignedBy: owner ? (sheetAsg ? "sheet" : "auto") : undefined, assignedAt: owner ? new Date() : undefined, fus: planNew(ts, cfg), trail: story });
+        const lead = await Lead.create({ ...f, key: phone, phone, ts, source: "sheet", assignedTo: owner, assignedBy: owner ? (sheetAsg ? "sheet" : "auto") : undefined, assignedAt: owner ? new Date() : undefined, fus: planNew(ts, cfg), trail: story, ...(sentCell ? { waWelcomeAt: new Date(), msgSent: sentCell } : {}) });
         remember(lead); touched.add(lead);
         added++; newLeads.push({ id: String(lead._id), owner, ts });
       }

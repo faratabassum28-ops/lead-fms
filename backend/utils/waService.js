@@ -34,7 +34,7 @@ export function problems(cfg) {
   if (!keyIsSet()) out.push("AISENSY_API_KEY is not set on the server (Render → Environment), then redeploy");
   if (!a.enabled) out.push("“Send the welcome message automatically” is switched off");
   if (!a.campaignName) out.push("AiSensy campaign name is empty");
-  if (!a.communityLink) out.push("Community / Zoom link is empty");
+  if (!a.communityLink) out.push("Default community / Zoom link is empty (leads with their own “WhatsApp Link” in the sheet still work; others are skipped)");
   if (!a.startText) out.push("Workshop start date & time is empty (each lead’s own UTW Date is used instead — leads without one are skipped)");
   return out;
 }
@@ -64,8 +64,8 @@ export async function sendWelcome(leadId, { callerName = "", by = "System", forc
   if (!force && lead.waWelcomeAt) return { status: "skipped", reason: "Already sent to this lead" };
   if (a.onlyPaid && !lead.paid && !force) return skip("Skipped — “only message paid leads” is on and this lead has not paid");
   // an unassigned lead still gets the message — signed by the team instead of silently never being sent
-  const params = welcomeParams({ name: lead.name, caller: callerName || lead.assignedTo || "My Soul School team", start: a.startText || lead.utwDate, link: a.communityLink });
-  if (params.some((p) => !p)) return skip("Skipped — fill in the workshop start date & time and the community link (Settings → WhatsApp)");
+  const params = welcomeParams({ name: lead.name, caller: callerName || lead.assignedTo || "My Soul School team", start: a.startText || lead.utwDate, link: /^https?:\/\/\S+$/i.test(lead.waLink || "") ? lead.waLink.trim() : a.communityLink });
+  if (params.some((p) => !p)) return skip("Skipped — needs a workshop start date & time (Settings, or the lead\u2019s UTW / start date) and a community link (the lead\u2019s “WhatsApp Link” in the sheet, or the default in Settings)");
   if (destinationFor(lead.phone).length < 11) return skip("Skipped — this lead has no valid phone number");
 
   // claim: only one request may send for this lead
@@ -76,7 +76,7 @@ export async function sendWelcome(leadId, { callerName = "", by = "System", forc
   const r = await deliver({ a, phone: lead.phone, name: lead.name, params });
   if (r.ok) {
     await record({ ...base, status: "sent", params, response: r.response });
-    await Lead.updateOne({ _id: lead._id }, { $unset: { waPendingAt: 1, waTriedAt: 1 }, $set: { waTries: 0 }, $push: { trail: S.trailOp("whatsapp", `Welcome WhatsApp sent via AiSensy (by ${by})`, "AiSensy") } });
+    await Lead.updateOne({ _id: lead._id }, { $unset: { waPendingAt: 1, waTriedAt: 1 }, $set: { waTries: 0, msgSent: sentStamp(), sheetDirty: true }, $push: { trail: S.trailOp("whatsapp", `Welcome WhatsApp sent via AiSensy (by ${by})`, "AiSensy") } });
     return { status: "sent" };
   }
   // release the claim, remember the attempt: the background job tries again (see retryPending)
@@ -109,6 +109,8 @@ export async function arrivalWelcome(leadId, owner = "") {
   } catch (e) { console.error("[whatsapp] arrival welcome failed:", e.message); }
 }
 
+// "Sent 15/11/2026 18:30" (India time) — written into the sheet's Msg Sent column
+const sentStamp = () => { const d = S.L(new Date()), p = (n) => String(n).padStart(2, "0"); return `Sent ${p(d.getUTCDate())}/${p(d.getUTCMonth() + 1)}/${d.getUTCFullYear()} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`; };
 const MAX_TRIES = 5, WINDOW_MS = 24 * 36e5;
 // every minute: send the welcomes that are due but not delivered yet (failed send, missing setting that is now filled in)
 export async function retryPending() {

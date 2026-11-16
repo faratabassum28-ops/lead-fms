@@ -10,9 +10,13 @@ const open = (h) => new Promise((r) => { const s = http.createServer(h); s.liste
 
 // ---- fake Google sheet (Apps Script web app) ----
 const dmy = (d) => { const p = (n) => String(n).padStart(2, "0"); const l = new Date(d.getTime() + 330 * 6e4); return `${p(l.getUTCDate())}/${p(l.getUTCMonth() + 1)}/${l.getUTCFullYear()} ${p(l.getUTCHours())}:${p(l.getUTCMinutes())}:${p(l.getUTCSeconds())}`; };
-const HEAD = ["Timestamp", "Lead Name", "Lead Email", "Lead Phone", "UTW Date", "Assigned To", "Workshop Name", "Level", "Profession", "City"];
+// the real sheet has "Workshop Start Date" BEFORE "Workshop Name", plus WhatsApp Link / Msg Sent / Call Status (the script maps them to fixed names)
+const HEAD = ["Timestamp", "Lead Name", "Lead Email", "Lead Phone", "UTW Date", "Assigned To", "Workshop Name", "Level", "Profession", "City", "WhatsApp Link", "Msg Sent", "Call Status"];
 let rows = [HEAD];
-const sheet = await open((req, res) => { res.setHeader("content-type", "application/json"); res.end(JSON.stringify({ ok: true, rows })); });
+const posts = [];
+const sheet = await open((req, res) => { res.setHeader("content-type", "application/json");
+  if (req.method === "POST") { let b = ""; req.on("data", (c) => (b += c)); req.on("end", () => { const j = JSON.parse(b); posts.push(j); res.end(JSON.stringify({ ok: true, updated: (j.updates || []).length, missing: [] })); }); return; }
+  res.end(JSON.stringify({ ok: true, rows })); });
 
 // ---- fake AiSensy ----
 const sent = []; let mode = "ok";
@@ -125,6 +129,27 @@ await t("new sheet lead is messaged automatically within the run; old history ro
   const got = sent.slice(b); assert.equal(got.length, 1); assert.equal(got[0].destination, "+919444444444"); assert.equal(got[0].templateParams[1], "Meera");
 });
 await t("Connected save does not double-send in arrival mode", async () => { const b = sent.length; const l5 = await Lead.findOne({ phone10: "9444444444" }); const x = await W.triggerWelcome(l5._id, { callerName: "Meera" }); assert.equal(x.status, "skipped"); assert.equal(sent.length, b); });
+
+console.log("Real-sheet columns: WhatsApp Link, Msg Sent, write-back");
+const row = (name, phone, extra = {}) => { const r = [dmy(new Date()), name, "", phone, "", "Meera", "", "", "", "", "", "", ""]; Object.entries(extra).forEach(([k, v]) => (r[HEAD.indexOf(k)] = v)); return r; };
+await S.setCfg({ ...(await S.getCfg()), aisensy: { ...(await S.getCfg()).aisensy, trigger: "arrival", communityLink: "https://default.example/group" } });
+await t("a lead's own WhatsApp Link is used as {{4}} (default only as a fallback)", async () => {
+  const b = sent.length;
+  rows.push(row("Own Link", "9666666661", { "WhatsApp Link": "https://chat.whatsapp.com/OWN1" })); rows.push(row("No Link", "9666666662"));
+  await SS.runSync(); await wait(2000);
+  const got = sent.slice(b).sort((x, y) => x.destination.localeCompare(y.destination)); assert.equal(got.length, 2);
+  assert.equal(got[0].templateParams[3], "https://chat.whatsapp.com/OWN1"); assert.equal(got[1].templateParams[3], "https://default.example/group");
+});
+await t("Msg Sent already filled (Pabbly sent it) -> the website does NOT send again", async () => {
+  const b = sent.length; rows.push(row("Pabbly Done", "9666666663", { "Msg Sent": "Sent 09/11/2026 13:25", "WhatsApp Link": "https://chat.whatsapp.com/X" }));
+  await SS.runSync(); await wait(1500); assert.equal(sent.length, b);
+  const l = await Lead.findOne({ phone10: "9666666663" }); assert.ok(l.waWelcomeAt); assert.equal(l.waLink, "https://chat.whatsapp.com/X");
+});
+await t("after sending, Msg Sent + Call Status are written back to the sheet", async () => {
+  posts.length = 0; const l = await Lead.findOne({ phone10: "9666666661" }); assert.match(l.msgSent, /^Sent \d\d\/\d\d\/\d{4} \d\d:\d\d$/); assert.equal(l.sheetDirty, true);
+  await S.pushDirty(); const u = posts.flatMap((p) => p.updates).find((x) => x.phone === "9666666661"); assert.ok(u, "no write-back sent"); assert.match(u.msgSent, /^Sent /);
+});
+await t("Workshop Start Date does not become the workshop name; WhatsApp Link is not the name", async () => { const l = await Lead.findOne({ phone10: "9666666661" }); assert.equal(l.workshop || "", ""); assert.equal(l.name, "Own Link"); });
 
 console.log(`\n${n} checks passed`);
 process.exit(process.exitCode || 0);

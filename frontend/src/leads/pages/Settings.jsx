@@ -302,7 +302,7 @@ function WhatsAppPanel({ c, setC, cfg, statuses, toast, saving }) {
       <Field label="Workshop start date & time — template variable {{3}}" hint="Typed exactly as it should appear, e.g. “Sat, 15 Nov · 7:00 PM IST”. Left blank, each lead’s own UTW Date is used.">
         <input className="ld-input" value={a.startText || ""} onChange={(e) => set({ startText: e.target.value })} placeholder="Sat, 15 Nov · 7:00 PM IST" />
       </Field>
-      <Field label="Private community / Zoom link — template variable {{4}}" hint="Must start with https://">
+      <Field label="Default community / Zoom link — template variable {{4}}" hint="Must start with https://. A lead’s own “WhatsApp Link” column in the sheet is used first; this default is used for leads that have none.">
         <input className="ld-input" value={a.communityLink || ""} onChange={(e) => set({ communityLink: e.target.value })} placeholder="https://chat.whatsapp.com/…" />
       </Field>
       <Check checked={!!a.onlyPaid} onChange={(v) => set({ onlyPaid: v })}>Only message leads who have <b>paid</b> (matched from Razorpay)</Check>
