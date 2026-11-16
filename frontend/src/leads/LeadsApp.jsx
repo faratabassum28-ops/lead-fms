@@ -24,6 +24,7 @@ const Attendance = lazyRetry(() => import("./pages/Attendance.jsx"));
 const Activity = lazyRetry(() => import("./pages/Activity.jsx"));
 const Performance = lazyRetry(() => import("./pages/Performance.jsx"));
 const Payments = lazyRetry(() => import("./pages/Payments.jsx"));
+const Bookings = lazyRetry(() => import("./pages/Bookings.jsx"));
 const Team = lazyRetry(() => import("./pages/Team.jsx"));
 const Settings = lazyRetry(() => import("./pages/Settings.jsx"));
 const Account = lazyRetry(() => import("../pages/Account.jsx"));
@@ -46,6 +47,7 @@ const I = {
   attfu: "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM17 11l2 2 4-4",
   attend: "M3 9a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v1.500a2 2 0 0 0 0 3V15a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1.500a2 2 0 0 0 0-3V9ZM10 7v10",
   activity: "M12 7v5l3 2M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z",
+  bookings: "M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4ZM3 6h18M16 10a4 4 0 0 1-8 0",
   payments: "M3 7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7ZM3 10h18M7 15h3",
   team: "M12 12a4.800 4.800 0 1 0 0-9.600 4.800 4.800 0 0 0 0 9.600Zm0 2.400c-3.600 0-9.600 1.800-9.600 5.400V22h19.200v-2.200c0-3.600-6-5.400-9.600-5.400Z",
   settings: "M12 15.500a3.500 3.500 0 1 0 0-7 3.500 3.500 0 0 0 0 7ZM19.400 13a7.400 7.400 0 0 0 .1-1 7.400 7.400 0 0 0-.1-1l2-1.600-2-3.400-2.400 1a7.600 7.600 0 0 0-1.700-1l-.4-2.500H9.100l-.4 2.500a7.600 7.600 0 0 0-1.700 1l-2.400-1-2 3.400 2 1.600a7.400 7.400 0 0 0 0 2L2.600 15l2 3.400 2.400-1a7.600 7.600 0 0 0 1.700 1l.4 2.500h5.800l.4-2.500a7.600 7.600 0 0 0 1.700-1l2.400 1 2-3.400-2-1.600Z",
@@ -85,6 +87,7 @@ function Shell() {
     { to: "/followups", label: "Delayed Follow-ups", icon: "followups", badge: followCount },
     { to: "/attendee-followups", label: "Attendee Follow-ups", icon: "attfu", badge: attendCount },
     { to: "/leads", label: "Leads", icon: "leads" },
+    { to: "/bookings", label: "New Bookings", icon: "bookings" },
     { to: "/attendance", label: "Attendance", icon: "attend" },
     { to: "/activity", label: "Activity", icon: "activity" },
     ...(!admin ? [{ to: "/reports", label: "My Reports", icon: "reports" }] : []),
@@ -174,6 +177,7 @@ function Shell() {
               <Route path="leads" element={<LeadList />} />
               <Route path="attendance" element={<Attendance />} />
               <Route path="activity" element={<Activity />} />
+              <Route path="bookings" element={<Bookings />} />
               <Route path="payments" element={guard(<Payments />)} />
               <Route path="team" element={guard(<Team />)} />
               <Route path="settings" element={guard(<Settings />)} />

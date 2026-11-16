@@ -184,3 +184,11 @@ All under `/api`, JSON, `Authorization: Bearer <token>`.
 `GET /activity` · `GET /progress` · `GET /leads/:id/history` · `POST /assign/reshare` (admin) · `GET /reports?months=` · `GET /config` · `PUT /config` (admin) · `POST /sync` (admin) ·
 `GET /today`, `GET /daily`, `POST /snapshot` (admin) · `GET /payments`, `GET /wa-log`, `POST /leads/:id/welcome-wa`, `POST /aisensy/test` (admin) ·
 **Public (no login, verified by Razorpay's signature + secret):** `POST /api/intake/payment` · `GET|POST|PUT|DELETE /team` (admin) · `GET /import-log` (admin).
+
+
+## New bookings → FU1 (the "New Order FMS" sheet)
+Paste `backend/sheet/Bookings.gs` (button **Copy booking script** in Settings → *New bookings → FU1*) into the order sheet, run `checkBookingTab`
+and `setupBookingSync`, deploy as a Web app and paste its URL in Settings. The website then reads the sheet every minute (and instantly when a
+row is added): every booking made **after the link was saved** becomes a **Paid** lead in **FU1, due now** (assigned by *Automatic assignment*);
+someone who is already a lead is marked Paid and pulled to FU1 — never duplicated. Each row is applied once, old orders are ignored, and the
+amount never double-counts a Razorpay payment. `npm run test:flow` covers it.

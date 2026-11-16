@@ -1,12 +1,13 @@
 import express from "express";
 import mongoose from "mongoose";
 import User from "../models/User.js";
-import { Lead, LeadActivity, LeadPayment, LeadSnapshot } from "../models/Lead.js";
+import { Lead, LeadActivity, LeadBooking, LeadPayment, LeadSnapshot } from "../models/Lead.js";
 import { hashPassword } from "../utils/auth.js";
 import { clearAuthCache } from "../middleware/auth.js";
 import * as S from "../utils/leadService.js";
 import * as W from "../utils/waService.js";
 import { runSync } from "../utils/sheetSync.js";
+import { bookingStatus } from "../utils/bookingSync.js";
 import { readFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 
@@ -30,12 +31,12 @@ const loadLead = async (id) => {
 router.get("/config", wrap(async (req, res) => {
   const c = await S.getCfg();
   res.json(req.lu.leadAdmin
-    ? { ...c, aisensy: W.aiCfg(c), lastSync: await S.lastSync(), integrations: { aisensyKey: W.keyIsSet(), aisensyProblems: W.problems(c), razorpaySignature: !!process.env.RAZORPAY_WEBHOOK_SECRET, razorpayUrlSecret: !!process.env.INTAKE_SECRET } }
+    ? { ...c, aisensy: W.aiCfg(c), lastSync: await S.lastSync(), bookingStatus: await bookingStatus(), integrations: { aisensyKey: W.keyIsSet(), aisensyProblems: W.problems(c), razorpaySignature: !!process.env.RAZORPAY_WEBHOOK_SECRET, razorpayUrlSecret: !!process.env.INTAKE_SECRET } }
     : { statuses: c.statuses, plan: c.plan, attPlan: c.attPlan, waTemplate: c.waTemplate });
 }));
 router.put("/config", adminOnly, wrap(async (req, res) => {
   const b = req.body || {}, applyToExisting = b.applyToExisting !== false;
-  delete b.lastSync; delete b.applyToExisting; delete b.share; delete b.integrations; // the daily share has its own endpoint
+  delete b.lastSync; delete b.bookingStatus; delete b.applyToExisting; delete b.share; delete b.integrations; // the daily share has its own endpoint
   const prev = await S.getCfg(), next = { ...prev, ...b };
   next.plan = S.cleanPlan(next.plan, "Lead follow-ups");
   next.attPlan = S.cleanPlan(next.attPlan, "Attendee follow-ups");
@@ -44,6 +45,12 @@ router.put("/config", adminOnly, wrap(async (req, res) => {
   next.aisensy = W.cleanAisensy({ ...W.aiCfg(prev), ...(b.aisensy || {}) });
   next.sheetUrl = String(next.sheetUrl || "").trim();
   if (next.sheetUrl && !/^https:\/\/script\.google(usercontent)?\.com\//.test(next.sheetUrl)) throw fail("The Google Script link should start with https://script.google.com/…");
+  next.bookingUrl = String(next.bookingUrl || "").trim();
+  if (next.bookingUrl && !/^https:\/\/script\.google(usercontent)?\.com\//.test(next.bookingUrl)) throw fail("The booking script link should start with https://script.google.com/…");
+  // "only bookings made after this moment": set when the link is first saved, editable (e.g. to test with a booking from this morning)
+  if (!next.bookingUrl) next.bookingFrom = "";
+  else if (next.bookingFrom) { const d = new Date(next.bookingFrom); if (isNaN(d)) throw fail("“Import bookings made after” is not a valid date"); next.bookingFrom = d.toISOString(); }
+  else next.bookingFrom = new Date().toISOString();
   if (!Array.isArray(next.statuses) || !next.statuses.length) throw fail("Add at least one call status");
   await S.setCfg(next);
   // a follow-up was ADDED or REMOVED -> every existing lead follows the new plan (and so to Today / Delayed / Attendee Follow-ups)
@@ -76,7 +83,8 @@ router.get("/sheet-script", adminOnly, wrap(async (req, res) => {
   if (!c.sheetToken) throw fail("Generate the secret key first, save settings, then copy the script");
   // the address the sheet pings when a row arrives: this very server (PUBLIC_URL / Render's own URL, else the address the browser used)
   const base = (process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || `${(req.get("x-forwarded-proto") || req.protocol).split(",")[0]}://${req.get("x-forwarded-host") || req.get("host")}`).replace(/\/$/, "");
-  const code = (await readFile(new URL("../sheet/Code.gs", import.meta.url), "utf8")).replace("__SECRET_KEY__", c.sheetToken).replace("__SYNC_URL__", `${base}/api/intake/sheet`);
+  const file = req.query.kind === "booking" ? "../sheet/Bookings.gs" : "../sheet/Code.gs";
+  const code = (await readFile(new URL(file, import.meta.url), "utf8")).replace("__SECRET_KEY__", c.sheetToken).replace("__SYNC_URL__", `${base}/api/intake/sheet`);
   res.json({ code });
 }));
 router.post("/sheet-key", adminOnly, wrap(async (_req, res) => res.json({ token: randomBytes(18).toString("hex") })));
@@ -88,6 +96,17 @@ router.post("/sheet-test", adminOnly, wrap(async (req, res) => {
   const H = rows[hi].map((h) => String(h).trim()), need = ["Timestamp", "Lead Name", "Lead Email", "Lead Phone", "UTW Date", "Assigned To", "Workshop"];
   const missing = need.filter((n) => !H.some((h) => h.toLowerCase().includes(n.toLowerCase().replace("lead ", ""))));
   res.json({ ok: true, leadsInSheet: rows.slice(hi + 1).filter((r) => String(r.find((_, i) => /phone/i.test(H[i] || "")) ?? "").trim()).length, headers: H.filter(Boolean), missing });
+}));
+
+// "Test connection" for the bookings sheet: how many rows the script returns and which columns it found
+router.post("/booking-test", adminOnly, wrap(async (req, res) => {
+  const cfg = { ...(await S.getCfg()), ...(req.body || {}) };
+  if (!cfg.bookingUrl || !cfg.sheetToken) throw fail("Paste the booking script link and generate the secret key first");
+  const url = String(cfg.bookingUrl).trim();
+  const r = await S.scriptCall({ ...cfg, sheetUrl: `${url}${url.includes("?") ? "&" : "?"}since=${Date.now() - 2 * 864e5}` });
+  const rows = r.rows || [], H = (rows[0] || []).map((h) => String(h));
+  const missing = ["Timestamp", "Name", "Phone", "Program", "Amount"].filter((n) => !H.some((h) => h.toLowerCase().includes(n.toLowerCase())));
+  res.json({ ok: true, recent: Math.max(rows.length - 1, 0), headers: H, missing, tab: r.tab || "" });
 }));
 
 // ---------- leads ----------
@@ -226,6 +245,12 @@ router.get("/reports", wrap(async (req, res) => res.json(await S.reports(req.lu,
 router.get("/payments", adminOnly, wrap(async (_req, res) => {
   const rows = await LeadPayment.find().sort({ paidAt: -1 }).limit(500).lean();
   res.json({ rows: rows.map(({ notes, ...r }) => r), total: rows.reduce((s, r) => s + (r.amount || 0), 0), noContact: rows.filter((r) => r.outcome === "no-contact").length });
+}));
+// "New Bookings": every booking from the New Order FMS sheet. Admins see all; a caller sees the bookings of the leads assigned to them.
+router.get("/bookings", wrap(async (req, res) => {
+  const filter = req.lu.leadAdmin ? {} : { leadKey: { $in: await Lead.find(S.mineFilter(req.lu)).distinct("key") } };
+  const rows = await LeadBooking.find(filter).sort({ ts: -1 }).limit(1000).lean();
+  res.json({ rows, total: rows.reduce((s, r) => s + (r.amount || 0), 0) });
 }));
 router.get("/wa-log", adminOnly, wrap(async (_req, res) => res.json(await W.waLog(100))));
 // an admin re-sends the welcome message for one lead (also the way to retry a failed one)

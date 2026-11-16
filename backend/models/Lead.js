@@ -19,6 +19,7 @@ const LeadSchema = new Schema(
   {
     key: { type: String, unique: true }, // the phone number as first imported — one lead per phone
     ts: Date, // when the lead came in
+    sheetSeenTs: Date, // the newest sheet row (Timestamp) already applied to this lead: a LATER row for the same phone = the person enquired again
     name: String,
     email: String,
     emailKey: { type: String, index: true }, // trimmed + lower-cased email: the sheet import / attendance match leads by it too
@@ -44,6 +45,7 @@ const LeadSchema = new Schema(
     paidAmount: Number, // total in rupees across all payments
     payIds: [String], // Razorpay payment ids already counted (makes re-delivered webhooks harmless)
     payMethod: String,
+    bookingRefs: [String], // booking-sheet rows already applied to this lead (a row is never applied twice)
     nameGuess: Boolean, // the name was guessed from the email — a later event with the real name replaces it
     // AiSensy: the "we just connected" WhatsApp is sent once per lead
     waWelcomeAt: Date,
@@ -56,7 +58,7 @@ const LeadSchema = new Schema(
     fus: [Fu], // Lead Qualification follow-ups 1..3
     d1Fus: [Fu], // Day 1 attendee follow-ups
     d2Fus: [Fu], // Day 2 attendee follow-ups
-    source: String, // sheet | manual | sheet-import
+    source: String, // sheet | manual | sheet-import | booking | razorpay
     sheetDirty: { type: Boolean, index: true }, // Level / Profession / City changed in the app and not yet written back to the Google Sheet
   },
   { timestamps: true }
@@ -87,6 +89,23 @@ export const LeadPayment = mongoose.model(
     { timestamps: true }
   ),
   "payments"
+);
+
+// One row per booking of the "New Order FMS" sheet (after it was connected) — the "New Bookings" page. A booking by someone who is
+// already a lead is listed too (outcome "matched"); a brand-new person is outcome "created". ref = "<timestamp ms>:<last 10 digits>".
+export const LeadBooking = mongoose.model(
+  "Booking",
+  new Schema(
+    {
+      ref: { type: String, unique: true },
+      ts: { type: Date, index: true }, // when the booking was made (the sheet's Timestamp)
+      name: String, email: String, phone: String, program: String, amount: Number, via: String,
+      leadKey: String, // the lead it became / was attached to
+      outcome: String, // "created" | "matched"
+    },
+    { timestamps: true }
+  ),
+  "bookings"
 );
 
 // Every WhatsApp (AiSensy) message the site tried to send: sent, failed or skipped — so nothing fails silently.

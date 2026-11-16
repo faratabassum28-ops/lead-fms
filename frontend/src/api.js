@@ -98,9 +98,11 @@ export const api = {
   ldSync: () => request("/sync", { method: "POST" }),
   ldSheetKey: () => request("/sheet-key", { method: "POST" }),
   ldSheetTest: (data) => request("/sheet-test", { method: "POST", body: JSON.stringify(data) }),
-  ldSheetScript: () => request("/sheet-script"),
+  ldSheetScript: (kind) => request("/sheet-script" + (kind ? `?kind=${kind}` : "")),
+  ldBookingTest: (data) => request("/booking-test", { method: "POST", body: JSON.stringify(data) }),
   ldMarkAttendance: (day, entries) => request("/attendance", { method: "POST", body: JSON.stringify({ day, entries }) }), // phone numbers and/or emails
   ldImportLog: () => request("/import-log"),
+  ldBookings: () => request("/bookings"), // bookings from the New Order FMS sheet
   ldPayments: () => request("/payments"), // Razorpay payments (admin)
   ldWaLog: () => request("/wa-log"), // AiSensy WhatsApp attempts (admin)
   ldWaResend: (id) => request(`/leads/${id}/welcome-wa`, { method: "POST" }),

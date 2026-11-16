@@ -15,7 +15,7 @@ const Field = ({ label, hint, children }) => <label className="ld-field"><span c
 export default function Settings() {
   const { cfg, load, sync, toast, leads } = useLeads();
   if (!cfg) return <PageLoader />;
-  return <Form key={JSON.stringify(cfg.plan) + JSON.stringify(cfg.attPlan) + JSON.stringify(cfg.assign) + cfg.intakeSheet + cfg.sheetUrl + cfg.sheetToken} cfg={cfg} load={load} sync={sync} toast={toast} leads={leads} />;
+  return <Form key={JSON.stringify(cfg.plan) + JSON.stringify(cfg.attPlan) + JSON.stringify(cfg.assign) + cfg.intakeSheet + cfg.sheetUrl + cfg.sheetToken + cfg.bookingUrl + cfg.bookingFrom} cfg={cfg} load={load} sync={sync} toast={toast} leads={leads} />;
 }
 
 function Form({ cfg, load, sync, toast, leads }) {
@@ -56,6 +56,14 @@ function Form({ cfg, load, sync, toast, leads }) {
     try { await navigator.clipboard.writeText((await api.ldSheetScript()).code); toast("Script copied — paste it in Apps Script", "good"); }
     catch (e) { toast(e.message.includes("Generate") ? e.message : "Couldn't copy — " + e.message, "bad"); }
   };
+  const [btest, setBtest] = useState(null);
+  const copyBookingScript = async () => {
+    try { await navigator.clipboard.writeText((await api.ldSheetScript("booking")).code); toast("Booking script copied — paste it in the New Order FMS sheet's Apps Script", "good"); }
+    catch (e) { toast(e.message.includes("Generate") ? e.message : "Couldn't copy — " + e.message, "bad"); }
+  };
+  const runBookingTest = async () => { setBtest(null); try { setBtest(await api.ldBookingTest({ bookingUrl: c.bookingUrl, sheetToken: c.sheetToken })); } catch (e) { setBtest({ ok: false, error: e.message }); } };
+  // <input type="datetime-local"> works in local time: convert to / from the saved ISO moment
+  const localVal = (iso) => { if (!iso) return ""; const d = new Date(iso); return isNaN(d) ? "" : new Date(d - d.getTimezoneOffset() * 6e4).toISOString().slice(0, 16); };
   const runTest = async () => { setTest(null); try { setTest(await api.ldSheetTest({ sheetUrl: c.sheetUrl, sheetToken: c.sheetToken, intakeSheet: c.intakeSheet })); } catch (e) { setTest({ ok: false, error: e.message }); } };
   return (
     <div className="page">
@@ -92,6 +100,33 @@ function Form({ cfg, load, sync, toast, leads }) {
             <input className="ld-input" value={c.intakeSheet} placeholder="https://docs.google.com/spreadsheets/d/…" onChange={(e) => setC({ ...c, intakeSheet: e.target.value })} />
           </Field>
         </details>
+      </Panel>
+
+
+      <Panel title="💳 New bookings → FU1">
+        <p className="ld-small" style={{ marginTop: 0 }}>
+          Every <b>new booking</b> in your <b>New Order FMS</b> sheet (tab <i>All New Booking</i>) becomes a <b>Paid</b> lead that starts in <b>FU1, due now</b>, and is shared out by <i>Automatic assignment</i>.
+          Someone who is already a lead is marked <b>Paid</b> and moved to <b>FU1</b> instead — never duplicated. Old orders already in the sheet are ignored.
+        </p>
+        <div className="ld-steps">
+          <div><b>1.</b> Use the same secret key as above, then in the <b>New Order FMS</b> sheet open <i>Extensions → Apps Script</i>, paste this script, run <code>checkBookingTab</code>, then <code>setupBookingSync</code>, then <i>Deploy → New deployment → Web app</i> (Execute as <i>Me</i>, access <i>Anyone</i>).
+            <div className="ld-actions" style={{ marginTop: 8 }}><button type="button" className="ld-btn" disabled={!cfg.sheetToken} onClick={copyBookingScript}>📋 Copy booking script</button></div></div>
+          <div><b>2.</b> Paste its Web app URL below, press <b>Save settings</b>, then <b>Test connection</b>.</div>
+        </div>
+        <Field label="New Order FMS — Web app URL" hint="A different link from the lead sheet's. Looks like https://script.google.com/macros/s/…/exec">
+          <input className="ld-input" value={c.bookingUrl || ""} placeholder="https://script.google.com/macros/s/…/exec" onChange={(e) => setC({ ...c, bookingUrl: e.target.value })} />
+        </Field>
+        {!!c.bookingUrl && <Field label="Import bookings made after" hint="Set automatically when you first save the link, so old orders never flood in. To test with a booking from earlier today, move this back, save, and it is picked up within a minute.">
+          <input className="ld-input ld-narrow" type="datetime-local" value={localVal(c.bookingFrom)} onChange={(e) => setC({ ...c, bookingFrom: e.target.value ? new Date(e.target.value).toISOString() : "" })} />
+        </Field>}
+        {btest && <div className={"ld-callout " + (btest.ok ? "good" : "bad")}>{btest.ok
+          ? <>✅ Connected{btest.tab ? ` to “${btest.tab}”` : ""} — {btest.recent} booking row(s) in the last 2 days.{btest.missing.length > 0 && <> Missing columns: <b>{btest.missing.join(", ")}</b>.</>}</>
+          : <>⚠ {btest.error}</>}</div>}
+        {cfg.bookingStatus && <p className="ld-small">Last check: {fmt(cfg.bookingStatus.at)} — {cfg.bookingStatus.ok ? (cfg.bookingStatus.armed ? "connected; bookings from now on will be imported" : `${cfg.bookingStatus.added || 0} new lead(s), ${cfg.bookingStatus.matched || 0} existing lead(s) marked Paid`) : <span className="ld-bad">{cfg.bookingStatus.error}</span>}. Checked every minute.</p>}
+        <div className="ld-actions" style={{ marginTop: 12 }}>
+          <button type="button" className="ld-btn" disabled={saving || !c.bookingUrl} onClick={runBookingTest}>Test connection</button>
+          <button type="button" className="ld-btn ld-btn-solid" disabled={saving} onClick={() => save(importNow)}>Save &amp; check now</button>
+        </div>
       </Panel>
 
       <AssignPanel c={c} setC={setC} leads={leads} saving={saving} onReshare={(q) => save(async () => {

@@ -1,6 +1,7 @@
 import * as S from "./leadService.js";
 import * as W from "./waService.js";
 import cron from "node-cron";
+import { syncBookings } from "./bookingSync.js";
 
 // One place that runs "sheet -> website": import the rows, then everything that should happen to a NEW lead.
 // Used by the 1-minute background job, the "Import from sheet" button and the instant ping from the Google Sheet.
@@ -9,11 +10,15 @@ import cron from "node-cron";
 const FRESH_MS = 24 * 36e5;
 
 export async function runSync(by = null) {
-  const r = await S.syncIntake(by);
+  // the bookings sheet is independent of the lead sheet: one failing never blocks the other
+  let r, err;
+  try { r = await S.syncIntake(by); } catch (e) { err = e; }
+  await syncBookings().catch(() => {}); // failures are saved + shown in Settings
+  if (err) throw err;
   const fresh = (r.newLeads || []).filter((n) => !n.ts || Date.now() - new Date(n.ts) < FRESH_MS);
   for (const n of fresh) W.arrivalWelcome(n.id, n.owner); // queued: never blocks the import, never throws
   S.bustProgress();
-  return { added: r.added, updated: r.updated, byEmailMatched: r.byEmailMatched };
+  return { added: r.added, updated: r.updated, byEmailMatched: r.byEmailMatched, again: r.again };
 }
 
 // The Google Sheet says "something changed": sync now. Many pings in a row (a 50-row paste) collapse into

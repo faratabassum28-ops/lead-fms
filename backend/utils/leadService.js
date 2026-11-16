@@ -26,6 +26,7 @@ const monthKey = (d) => L(d).toISOString().slice(0, 7);
 // ---------------------------------------------------------------------------
 export const DEF = {
   intakeSheet: "", // legacy: public CSV link of the sheet (read-only)
+  bookingUrl: "", bookingFrom: "", // "New Order FMS" Apps Script link + the moment it was connected: only bookings made AFTER it become leads in FU1
   sheetUrl: "", sheetToken: "", // Google Apps Script web-app link + secret: reads the private sheet AND writes Level / Profession / City back
   workStart: "09:00", workEnd: "19:00", skipSunday: true,
   plan: [{ days: 0, time: "16:00" }, { days: 1, time: "11:00" }, { days: 2, time: "11:00" }],
@@ -202,7 +203,7 @@ function parseCsv(t) {
   return rows;
 }
 // dd/mm/yyyy [hh:mm[:ss]] in India time (what the sheet's Timestamp column holds)
-const pdate = (s) => {
+export const pdate = (s) => {
   if (!s) return null;
   const m = s.trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
   if (m) return U(new Date(Date.UTC(+m[3], +m[2] - 1, +m[1], +(m[4] || 0), +(m[5] || 0), +(m[6] || 0))));
@@ -340,7 +341,7 @@ async function scriptOnce(cfg, body) {
   }
   return j;
 }
-async function scriptCall(cfg, body) {
+export async function scriptCall(cfg, body) {
   let err;
   for (let a = 1; a <= 3; a++) {
     try { const j = await scriptOnce(cfg, body); lastAttempts = a; return j; }
@@ -420,7 +421,7 @@ export async function syncIntake(by = null) {
     const canonWs = (v) => { const w = cleanWorkshop(v); if (!w) return ""; if (!wsCanon.has(w.toLowerCase())) wsCanon.set(w.toLowerCase(), w); return wsCanon.get(w.toLowerCase()); };
 
     const A = await assigner("new", cfg);
-    let added = 0, updated = 0, byEmailMatched = 0;
+    let added = 0, updated = 0, byEmailMatched = 0, again = 0;
     const newLeads = []; // leads created by THIS import (used to send the arrival WhatsApp)
     const touched = new Set(); // leads already handled in this import
     const rowErrors = [];
@@ -450,6 +451,16 @@ export async function syncIntake(by = null) {
           trail(ex, "assign", ex.assignedTo ? `Reassigned from ${ex.assignedTo} to ${sheetAsg} (from the sheet)` : `Assigned to ${sheetAsg} (from the sheet)`);
           ex.assignedTo = sheetAsg; ex.assignedBy = "sheet"; ex.assignedAt = new Date();
         }
+        // The SAME person on a NEW sheet row (a later Timestamp, made in the last 24 h) = a fresh enquiry: back to FU1, due now.
+        // (A row that was already applied — or an old row — never triggers this, so re-reading the sheet every minute changes nothing.)
+        const rowTs = pdate(cell(r, ix.ts)), seen = ex.sheetSeenTs || ex.ts;
+        if (rowTs && seen && rowTs - seen > 1000 && Date.now() - rowTs < 864e5 && Date.now() - rowTs > -36e5) {
+          ex.fus = planNew(new Date(), cfg);
+          ex.sheetSeenTs = rowTs;
+          if (!sentCell) { ex.waWelcomeAt = undefined; ex.msgSent = ""; } // a new enquiry gets its own welcome message
+          trail(ex, "entered", `Enquired again (new row in the sheet)${f.workshop ? " · " + f.workshop : ""} — follow-ups restarted, FU1 due now`, "System");
+          newLeads.push({ id: String(ex._id), owner: ex.assignedTo, ts: rowTs }); again++;
+        }
         if (ex.isModified()) { await ex.save(); updated++; if (viaEmail) byEmailMatched++; }
         remember(ex); existing.set(ten, ex);
       } else {
@@ -464,13 +475,13 @@ export async function syncIntake(by = null) {
      } catch (e) { rowErrors.push(`${phone}: ${e.code === 11000 ? "duplicate phone number" : e.message}`); console.error("[sheet] row skipped:", phone, e.message); }
     }
     await A.save();
-    const res = { added, updated, byEmailMatched, rows: data.length, ok: true, ...(rowErrors.length ? { rowErrors: rowErrors.slice(0, 5), skippedRows: rowErrors.length } : {}) };
+    const res = { added, updated, byEmailMatched, again, rows: data.length, ok: true, ...(rowErrors.length ? { rowErrors: rowErrors.slice(0, 5), skippedRows: rowErrors.length } : {}) };
     await saveSync(res);
     // every click is logged; the silent 5-minute run only when it changed something (or when it is working again after failures)
     const back = prev && prev.ok === false && !by;
     if (by || added || updated || back)
       await logImport({ ...who, ...res, note: back ? `Working again after ${prev.streak || 1} failed check${(prev.streak || 1) > 1 ? "s" : ""}` : tries > 1 ? `Google needed ${tries} tries` : rowErrors.length ? `${rowErrors.length} row(s) skipped: ${rowErrors[0]}` : undefined });
-    return { added, updated, byEmailMatched, newLeads };
+    return { added, updated, byEmailMatched, again, newLeads };
   } catch (e) {
     // the 5-minute run fails with the same message again and again while Google is down — log the first one, not every one
     const streak = prev && prev.ok === false && prev.error === e.message ? (prev.streak || 1) + 1 : 1;

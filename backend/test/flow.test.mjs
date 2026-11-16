@@ -19,6 +19,10 @@ const sheet = await open((req, res) => { res.setHeader("content-type", "applicat
   res.end(JSON.stringify({ ok: true, rows })); });
 
 // ---- fake AiSensy ----
+// ---- fake booking sheet (the New Order FMS Apps Script) ----
+const BH = ["Timestamp", "Name", "Email", "Phone", "Program", "Amount", "Paid Through"];
+let brows = [BH], bmode = "ok"; const bseen = [];
+const bsheet = await open((req, res) => { bseen.push(req.url); res.setHeader("content-type", "application/json"); res.end(JSON.stringify(bmode === "ok" ? { ok: true, tab: "All New Booking", rows: brows } : { ok: false, error: "Wrong secret key" })); });
 const sent = []; let mode = "ok";
 const ai = await open((req, res) => { let b = ""; req.on("data", (c) => (b += c)); req.on("end", () => {
   const j = JSON.parse(b); sent.push(j);
@@ -130,9 +134,65 @@ await t("new sheet lead is messaged automatically within the run; old history ro
 });
 await t("Connected save does not double-send in arrival mode", async () => { const b = sent.length; const l5 = await Lead.findOne({ phone10: "9444444444" }); const x = await W.triggerWelcome(l5._id, { callerName: "Meera" }); assert.equal(x.status, "skipped"); assert.equal(sent.length, b); });
 
+console.log("Same person, new sheet row (re-enquiry) -> FU1 again");
+await S.setCfg({ ...(await S.getCfg()), bookingUrl: "", aisensy: { ...(await S.getCfg()).aisensy, enabled: false } });
+await t("a NEW row for a phone that is already a lead brings it back to FU1, due now", async () => {
+  const ex = await Lead.findOne({ phone10: "9000000001" }); ex.fus.forEach((f) => { f.actual = new Date(); f.status = "Connected"; }); ex.markModified("fus"); ex.waWelcomeAt = new Date(); await ex.save();
+  rows.push([dmy(new Date()), "Ravi", "", "9000000001", "", "Dolly", "test workshop", "", "", "", "", "", ""]);
+  const r = await SS.runSync(); assert.equal(r.again, 1); assert.equal(r.added, 0);
+  const l = await Lead.findOne({ phone10: "9000000001" }); assert.ok(Math.abs(l.fus[0].planned - Date.now()) < 30_000, "FU1 not due now"); assert.ok(!l.fus[0].actual); assert.equal(l.fus.length, 3);
+  assert.equal(l.name, "Ravi"); assert.equal(l.workshop, "test workshop"); assert.ok(!l.waWelcomeAt); assert.ok(l.trail.some((x) => /Enquired again/.test(x.text)));
+});
+await t("re-reading the same row every minute does NOT restart it again", async () => {
+  const l1 = await Lead.findOne({ phone10: "9000000001" }); l1.fus[0].actual = new Date(); l1.fus[0].status = "DNP"; l1.markModified("fus"); await l1.save();
+  const r = await SS.runSync(); assert.equal(r.again, 0); assert.ok((await Lead.findOne({ phone10: "9000000001" })).fus[0].actual);
+});
+await t("an old row for an existing lead never restarts it (no flood after deploy)", async () => {
+  rows.push([dmy(new Date(Date.now() - 3 * 864e5)), "Old Again", "", "9000000001", "", "Dolly", "", "", "", "", "", "", ""]);
+  const r = await SS.runSync(); assert.equal(r.again, 0);
+});
+
+console.log("New bookings -> FU1");
+const BM = await import(B + "/utils/bookingSync.js");
+const brow = (minsAgo, name, phone, prog = "Tarot - Mastery", amt = "11,999", via = "Razorpay", email = "") => [dmy(new Date(Date.now() - minsAgo * 6e4)), name, email, phone, prog, amt, via];
+await S.setCfg({ ...(await S.getCfg()), bookingUrl: `http://127.0.0.1:${bsheet.address().port}/exec`, bookingFrom: "", aisensy: { ...(await S.getCfg()).aisensy, enabled: false } });
+brows.push(brow(60 * 24 * 400, "Ancient Order", "9000000777")); // history: must never import
+await t("first run only ARMS the import — thousands of old orders never flood in", async () => {
+  const r = await BM.syncBookings(); assert.equal(r.armed, true); assert.ok((await S.getCfg()).bookingFrom); assert.equal(await Lead.countDocuments({ source: "booking" }), 0);
+});
+await t("a booking made after connecting becomes a PAID lead in FU1, due now", async () => {
+  await S.setCfg({ ...(await S.getCfg()), bookingFrom: new Date(Date.now() - 3600_000).toISOString() });
+  brows.push(brow(5, "Rumneek Arora", "9910630650"));
+  const r = await BM.syncBookings(); assert.equal(r.added, 1);
+  const l = await Lead.findOne({ phone10: "9910630650" }); assert.equal(l.source, "booking"); assert.equal(l.paid, true); assert.equal(l.paidAmount, 11999); assert.equal(l.workshop, "Tarot - Mastery"); assert.equal(l.payMethod, "Razorpay");
+  assert.ok(Math.abs(l.fus[0].planned - Date.now()) < 30_000, "FU1 not due now"); assert.equal(l.fus.length, 3);
+  assert.equal(await Lead.countDocuments({ phone10: "9000000777" }), 0);
+});
+await t("the same booking is never applied twice (1-minute re-read)", async () => { const r = await BM.syncBookings(); assert.equal(r.added, 0); assert.equal(await Lead.countDocuments({ phone10: "9910630650" }), 1); assert.equal((await Lead.findOne({ phone10: "9910630650" })).paidAmount, 11999); });
+await t("91-prefixed phone, 6000 amount, new person", async () => { brows.push(brow(2, "Hiral Patel", "919769363794", "Tarot - Diploma", "6999")); const r = await BM.syncBookings(); assert.equal(r.added, 1); const l = await Lead.findOne({ phone10: "9769363794" }); assert.equal(l.paidAmount, 6999); assert.equal(l.workshop, "Tarot - Diploma"); });
+await t("an existing lead who books is marked Paid and pulled to FU1 (no duplicate)", async () => {
+  const ex = await Lead.findOne({ phone10: "9876543210" }); ex.fus[0].planned = new Date(Date.now() + 5 * 864e5); ex.fus[0].actual = undefined; ex.markModified("fus"); await ex.save();
+  const n = await Lead.countDocuments(); brows.push(brow(1, "Priya S", "9876543210", "Tarot - Mastery", "6000", "UPI"));
+  const r = await BM.syncBookings(); assert.equal(r.matched, 1); assert.equal(r.added, 0); assert.equal(await Lead.countDocuments(), n);
+  const l = await Lead.findOne({ phone10: "9876543210" }); assert.equal(l.paid, true); assert.equal(l.paidAmount, 6000); assert.ok(Math.abs(l.fus[0].planned - Date.now()) < 30_000, "FU1 not pulled to now"); assert.ok(l.trail.some((x) => /Booking received/.test(x.text)));
+});
+await t("a lead whose FU1 is already done keeps it (only marked Paid)", async () => {
+  const ex = await Lead.findOne({ phone10: "9111111111" }); ex.fus[0].actual = new Date(); ex.fus[0].status = "Connected"; ex.markModified("fus"); const planned = +ex.fus[0].planned; await ex.save();
+  brows.push(brow(1, "A", "9111111111", "Tarot", "6000")); await BM.syncBookings(); const l = await Lead.findOne({ phone10: "9111111111" }); assert.equal(l.paid, true); assert.equal(+l.fus[0].planned, planned);
+});
+await t("the script is asked only for recent rows (fast with thousands of old orders)", async () => assert.ok(bseen.some((u) => /since=\d+/.test(u))));
+await t("a failing booking sheet is reported, not crashed; the next minute recovers", async () => {
+  bmode = "bad"; await assert.rejects(() => BM.syncBookings(), /secret key/); const st = await BM.bookingStatus(); assert.equal(st.ok, false);
+  bmode = "ok"; brows.push(brow(0, "After Outage", "9777777777")); const r = await BM.syncBookings(); assert.equal(r.added, 1); assert.equal((await BM.bookingStatus()).ok, true);
+});
+await t("runSync imports leads AND bookings together; a lead-sheet failure does not block bookings", async () => {
+  brows.push(brow(0, "Together", "9888880001")); const c = await S.getCfg(); await S.setCfg({ ...c, sheetUrl: "http://127.0.0.1:1/exec" });
+  await assert.rejects(() => SS.runSync()); assert.ok(await Lead.findOne({ phone10: "9888880001" })); await S.setCfg(c);
+});
+
 console.log("Real-sheet columns: WhatsApp Link, Msg Sent, write-back");
 const row = (name, phone, extra = {}) => { const r = [dmy(new Date()), name, "", phone, "", "Meera", "", "", "", "", "", "", ""]; Object.entries(extra).forEach(([k, v]) => (r[HEAD.indexOf(k)] = v)); return r; };
-await S.setCfg({ ...(await S.getCfg()), aisensy: { ...(await S.getCfg()).aisensy, trigger: "arrival", communityLink: "https://default.example/group" } });
+await S.setCfg({ ...(await S.getCfg()), aisensy: { ...(await S.getCfg()).aisensy, enabled: true, trigger: "arrival", communityLink: "https://default.example/group" } });
 await t("a lead's own WhatsApp Link is used as {{4}} (default only as a fallback)", async () => {
   const b = sent.length;
   rows.push(row("Own Link", "9666666661", { "WhatsApp Link": "https://chat.whatsapp.com/OWN1" })); rows.push(row("No Link", "9666666662"));
