@@ -109,7 +109,7 @@ function Form({ cfg, load, sync, toast, leads }) {
           Someone who is already a lead is marked <b>Paid</b> and moved to <b>FU1</b> instead — never duplicated. Old orders already in the sheet are ignored.
         </p>
         <div className="ld-steps">
-          <div><b>1.</b> Use the same secret key as above, then in the <b>New Order FMS</b> sheet open <i>Extensions → Apps Script</i>, paste this script, run <code>checkBookingTab</code>, then <code>setupBookingSync</code>, then <i>Deploy → New deployment → Web app</i> (Execute as <i>Me</i>, access <i>Anyone</i>).
+          <div><b>1.</b> Use the same secret key as above, then in the <b>New Order FMS</b> sheet open <i>Extensions → Apps Script</i> and add the script as a <b>new file</b> (<i>Files + → Script</i>, name it <code>Bookings</code> — keep your existing files), run <code>checkBookingTab</code>, then <code>setupBookingSync</code>, then <i>Deploy → New deployment → Web app</i> (Execute as <i>Me</i>, access <i>Anyone</i>).
             <div className="ld-actions" style={{ marginTop: 8 }}><button type="button" className="ld-btn" disabled={!cfg.sheetToken} onClick={copyBookingScript}>📋 Copy booking script</button></div></div>
           <div><b>2.</b> Paste its Web app URL below, press <b>Save settings</b>, then <b>Test connection</b>.</div>
         </div>
