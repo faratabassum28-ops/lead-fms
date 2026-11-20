@@ -27,7 +27,7 @@ export default function Payments() {
   const rows = (r?.rows || []).filter((x) => !needle || [x.name, x.phone, x.email, x.workshop, x.paymentId].join(" ").toLowerCase().includes(needle));
   return (
     <div className="page">
-      <PageHeader title="Payments" subtitle="Live from Razorpay — each payment becomes a lead, or marks an existing lead as paid"
+      <PageHeader title="Razorpay Payments" subtitle="Live from Razorpay — every payment appears here only (paid leads are not added to FU1 / FU2); an existing lead is marked as paid"
         meta={<div className="ld-actions">
           {r && <span className="chip"><strong>{r.rows.length}</strong> payments · <strong>{rupees(r.total)}</strong></span>}
           <button type="button" className="ld-btn" disabled={!rows.length} onClick={() => downloadCsv("payments.csv", [["Paid at", "Name", "Phone", "Email", "Workshop", "Amount", "Method", "Payment id", "Result"], ...rows.map((x) => [fmt(x.paidAt), x.name, x.phone, x.email, x.workshop, x.amount, x.method, x.paymentId, (OUT[x.outcome] || [])[1] || ""])])}>⬇ CSV</button>

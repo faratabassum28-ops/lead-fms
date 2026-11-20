@@ -2650,3 +2650,11 @@ button:not(.link-btn):not(.collapse-btn):not(.modal-x):not(.btn-ghost):not(.btn-
 /* sidebar: a long label (e.g. "Delayed Follow-ups") truncates instead of pushing the count badge out of view */
 .nav-link .nav-label { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; }
 .nav-link .nav-badge { flex: 0 0 auto; margin-left: auto; }
+
+/* Sidebar group (Attendee Follow-ups → Day 1 / Day 2): header + indented children with a guide line */
+.nav-group { display: flex; flex-direction: column; }
+.nav-group-head { display: flex; align-items: center; gap: 11px; color: #b7bdc9; padding: 9px 12px; font-size: 13.5px; font-weight: 500; border-left: 3px solid transparent; white-space: nowrap; overflow: hidden; }
+.nav-group-head.on { color: #fff; font-weight: 600; }
+.nav-sub { margin: 2px 0 4px 21px; padding-left: 10px; border-left: 2px solid rgba(255, 255, 255, 0.12); display: flex; flex-direction: column; gap: 2px; }
+.nav-sublink { padding: 7px 10px; font-size: 13px; }
+.nav-group-head .nav-label { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; }

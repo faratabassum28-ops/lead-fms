@@ -1,6 +1,6 @@
 import { Lead, WaMessage } from "../models/Lead.js";
 import * as S from "./leadService.js";
-import { buildBody, destinationFor, postCampaign, welcomeParams } from "./aisensy.js";
+import { buildBody, cleanKey, destinationFor, postCampaign, welcomeParams } from "./aisensy.js";
 
 // "We just connected" WhatsApp, sent through AiSensy the first time a lead's call is saved as Connected.
 //   • The API key lives ONLY in the server's environment (AISENSY_API_KEY) — never in the database or the browser.
@@ -27,7 +27,7 @@ export function cleanAisensy(a = {}) {
   return out;
 }
 
-export const keyIsSet = () => !!process.env.AISENSY_API_KEY;
+export const keyIsSet = () => !!cleanKey(process.env.AISENSY_API_KEY);
 // What is still missing before a welcome can go out — shown in Settings so a silent "not working" is never a mystery.
 export function problems(cfg) {
   const a = aiCfg(cfg), out = [];
@@ -41,13 +41,23 @@ export function problems(cfg) {
 export const waLog = (limit = 100) => WaMessage.find().sort({ at: -1 }).limit(limit).lean();
 const record = (v) => WaMessage.create({ at: new Date(), ...v }).catch((e) => console.error("[whatsapp] log failed:", e.message));
 
+// A 401/403 means AiSensy itself rejected the API key: retrying every minute cannot fix it and only fills the log.
+// So after one rejection every background retry pauses for 10 minutes; a successful send (or test) clears the pause.
+let keyRejectedAt = 0;
+const KEY_PAUSE_MS = 10 * 60_000;
+const keyPaused = () => keyRejectedAt && Date.now() - keyRejectedAt < KEY_PAUSE_MS;
+const KEY_HELP = "AiSensy rejected the API key (HTTP 401). The key on the server is wrong, expired or was regenerated. Fix: AiSensy → Manage → API Key → copy the key → Render → Environment → AISENSY_API_KEY (no quotes, no spaces) → save and redeploy.";
+
 // shared by the real welcome and the "send a test" button
 async function deliver({ a, phone, name, params }) {
-  const key = process.env.AISENSY_API_KEY;
+  const key = cleanKey(process.env.AISENSY_API_KEY);
   if (!key) return { ok: false, error: "AISENSY_API_KEY is not set on the server (add it in Render → Environment)" };
   if (!a.campaignName) return { ok: false, error: "No AiSensy campaign name in Settings" };
   const r = await postCampaign(buildBody({ apiKey: key, campaignName: a.campaignName, phone, name, params, tags: ["lead-fms"] }));
-  return r.ok ? { ok: true, response: r.body } : { ok: false, error: `AiSensy said (HTTP ${r.status || "—"}): ${r.body}` };
+  if (r.ok) { keyRejectedAt = 0; return { ok: true, response: r.body }; }
+  if (r.status === 401 || r.status === 403) { keyRejectedAt = Date.now(); return { ok: false, authFailed: true, error: `${KEY_HELP} (AiSensy said: ${r.body})` }; }
+  if (r.status === 400 && /campaign/i.test(r.body)) return { ok: false, error: `AiSensy said (HTTP 400): ${r.body} — the campaign name in Settings must match a LIVE API campaign in AiSensy exactly (same spelling, same case).` };
+  return { ok: false, error: `AiSensy said (HTTP ${r.status || "—"}): ${r.body}` };
 }
 
 // callerName = who the lead is talking to ({{2}} in the template)
@@ -80,7 +90,7 @@ export async function sendWelcome(leadId, { callerName = "", by = "System", forc
     return { status: "sent" };
   }
   // release the claim, remember the attempt: the background job tries again (see retryPending)
-  await Lead.updateOne({ _id: lead._id }, { ...(before ? { $set: { waWelcomeAt: before } } : { $unset: { waWelcomeAt: 1 } }), $inc: { waTries: 1 } });
+  await Lead.updateOne({ _id: lead._id }, { ...(before ? { $set: { waWelcomeAt: before } } : { $unset: { waWelcomeAt: 1 } }), ...(r.authFailed ? {} : { $inc: { waTries: 1 } }) });
   await Lead.updateOne({ _id: lead._id }, { $set: { waTriedAt: new Date() }, $push: { trail: S.trailOp("whatsapp", `Welcome WhatsApp could not be sent: ${r.error}`, "AiSensy") } });
   await record({ ...base, status: "failed", params, error: r.error });
   return { status: "failed", reason: r.error };
@@ -115,7 +125,7 @@ const MAX_TRIES = 5, WINDOW_MS = 24 * 36e5;
 // every minute: send the welcomes that are due but not delivered yet (failed send, missing setting that is now filled in)
 export async function retryPending() {
   const a = aiCfg(await S.getCfg());
-  if (!a.enabled) return { retried: 0 };
+  if (!a.enabled || keyPaused()) return { retried: 0 };
   const now = Date.now();
   const due = await Lead.find({ waWelcomeAt: null, waPendingAt: { $gt: new Date(now - WINDOW_MS) }, waTries: { $lt: MAX_TRIES } }).limit(20);
   let retried = 0;

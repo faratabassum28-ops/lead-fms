@@ -13,6 +13,9 @@ export function destinationFor(phone) {
   return d.length >= 10 ? "+" + d : "";
 }
 
+// A key pasted into Render/Vercel often carries a trailing newline, spaces or surrounding quotes — AiSensy then answers 401.
+export const cleanKey = (k) => String(k ?? "").trim().replace(/^["'`]+|["'`]+$/g, "").trim();
+
 // "priya sharma" -> "Priya" (the template says "Hi {{1}}")
 export const firstName = (name) => {
   const w = String(name ?? "").trim().split(/\s+/)[0] || "";

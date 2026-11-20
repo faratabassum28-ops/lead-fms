@@ -37,6 +37,7 @@ export const planLen = (cfg, set) => (set === "fus" ? cfg?.plan : cfg?.attPlan)?
 export const tasksOf = (leads, who, cfg) =>
   leads
     .flatMap((l) => SETS.flatMap(([set, lb]) => (l[set] || []).slice(0, planLen(cfg, set)).map((f, i) => ({ l, f, i, set, lb }))))
+    .filter((t) => !(t.set === "fus" && t.l.source === "razorpay")) // paid-by-Razorpay leads live in the Razorpay Payments tab, not in FU1
     .filter((t) => t.f.planned && !t.f.actual && !t.f.skipped && (t.i === 0 || t.l[t.set][t.i - 1].actual || t.l[t.set][t.i - 1].skipped) && (!who || stageWho(t.l, t.set) === who.toLowerCase()));
 
 // the person a follow-up belongs to, as they are spelled on the lead ("Unassigned" when nobody has it yet)

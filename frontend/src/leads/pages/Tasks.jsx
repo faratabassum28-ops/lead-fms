@@ -96,7 +96,7 @@ function TaskColumn({ id, label, sub, items, tone, lim, onMore, step, calm, empt
 
 // The working lists. view = "today" (everything planned for today), "followups" (Delayed: planned on an earlier day and
 // still pending) or "attendees" (Day 1 / Day 2 calls). Each is laid out as one column per follow-up step.
-export default function Tasks({ view = "today" }) {
+export default function Tasks({ view = "today", day: dayProp = 0 }) {
   const { leads, loaded, cfg, now, who, admin, setModal, inWs, openLead, callers } = useLeads();
   const { user } = useAuth();
   const [lims, setLims] = useState({}); // how many cards each column shows
@@ -130,7 +130,7 @@ export default function Tasks({ view = "today" }) {
   const buckets = delayed ? DELAY_BUCKETS : today ? TODAY_BUCKETS : null;
   const bCount = (k) => base.filter((t) => bucketOf(t, now, delayed) === k).length;
   // Attendee follow-ups: one tab per workshop day (Day 3 only when a 3-day workshop exists), each with its own FU1 / FU2 columns
-  const nDays = dayCount(cfg, leads), dayNow = Math.min(day, nDays), daySet = "d" + dayNow + "Fus";
+  const nDays = dayCount(cfg, leads), dayNow = Math.min(dayProp || day, nDays), daySet = "d" + dayNow + "Fus";
   const scoped = attendees ? base.filter((t) => t.set === daySet) : base;
   let pool = buckets && bucket !== "all" ? base.filter((t) => bucketOf(t, now, delayed) === bucket) : scoped;
   if (delayed && sort === "new") pool = [...pool].reverse();
@@ -141,7 +141,7 @@ export default function Tasks({ view = "today" }) {
   if (!loaded || !cfg) return <PageLoader />;
 
   const first = (user?.name || "").split(" ")[0];
-  const title = attendees ? "Attendee Follow-ups" : delayed ? "Delayed Follow-ups" : calm && first ? `${hello(now.getHours())}, ${first} 🌿` : "Today Follow-ups";
+  const title = attendees ? (dayProp ? `Day ${dayNow} · Attendee Follow-ups` : "Attendee Follow-ups") : delayed ? "Delayed Follow-ups" : calm && first ? `${hello(now.getHours())}, ${first} 🌿` : "Today Follow-ups";
   const subtitle = attendees
     ? "Calls to people who attended each workshop day — pick the Day tab; one column per follow-up"
     : delayed
@@ -169,7 +169,7 @@ export default function Tasks({ view = "today" }) {
       {today && <TeamRace />}
       <Stats items={stats} />
       <WorkshopBar items={[...new Map(poolAll.map((t) => [t.l._id, t.l])).values()]} />
-      {attendees && (
+      {attendees && !dayProp && (
         <div className="range-pills" role="tablist" aria-label="Workshop day" style={{ margin: "12px 0 0" }}>
           {Array.from({ length: nDays }, (_, i) => i + 1).map((d) => (
             <button key={d} type="button" role="tab" aria-selected={dayNow === d} className={"range-pill" + (dayNow === d ? " range-pill-active" : "")} onClick={() => setDay(d)}>
