@@ -4,8 +4,8 @@ import * as S from "./leadService.js";
 // A captured Razorpay payment becomes (or enriches) a lead:
 //   • the payer is matched to an existing lead by phone, then by email  -> the lead is marked Paid
 //   • nobody matches                                                    -> a new lead is created, assigned by
-//                                                                          Settings → Automatic assignment, with the
-//                                                                          normal follow-up plan
+//                                                                          Settings → Automatic assignment, with NO
+//                                                                          FU1/FU2 plan (it appears in Razorpay Payments only)
 //   • no phone and no known email                                       -> the payment is stored as "no-contact"
 //                                                                          and shown on the Payments page
 // The same payment arrives twice when it was made through a payment link (payment.captured AND payment_link.paid),
@@ -71,7 +71,8 @@ async function apply(p) {
         key: m.phone, phone: m.phone, name: m.name, nameGuess: m.nameGuess, email: m.email, workshop: ws, ts: m.paidAt, source: "razorpay",
         paid: true, paidAt: m.paidAt, paidAmount: m.amount, payIds: [m.paymentId], payMethod: m.method,
         assignedTo: owner, assignedBy: owner ? "auto" : undefined, assignedAt: owner ? now : undefined,
-        fus: S.planNew(now, cfg), trail: story,
+        fus: [], trail: story, // a paid lead is NOT put into FU1 — it lives in the Razorpay Payments tab
+
       });
       await A.save();
       doc.outcome = "created";

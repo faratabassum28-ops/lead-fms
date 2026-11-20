@@ -1,5 +1,5 @@
 import React, { Suspense, useEffect, useState } from "react";
-import { Routes, Route, NavLink, Navigate } from "react-router-dom";
+import { Routes, Route, NavLink, Navigate, useLocation } from "react-router-dom";
 import LeadsLogo from "../components/LeadsLogo.jsx";
 import { useTheme } from "../context/ThemeContext.jsx";
 import { useAuth } from "../context/AuthContext.jsx";
@@ -10,7 +10,7 @@ import RouteBoundary from "../components/RouteBoundary.jsx";
 import { LeadsProvider, useLeads } from "./LeadsContext.jsx";
 import ShortcutsHelp from "../components/ShortcutsHelp.jsx";
 import { useSlashToFocusSearch } from "../hooks/useSlashToFocusSearch.js";
-import { isDueToday, tasksOf } from "./leadUtils.js";
+import { dayCount, isDueToday, tasksOf } from "./leadUtils.js";
 import "./leads.css";
 
 const Board = lazyRetry(() => import("./pages/Board.jsx"));
@@ -78,22 +78,29 @@ function Shell() {
   const pending = tasksOf(leads, who, cfg).filter((t) => new Date(t.f.planned) <= eod);
   const fuOnly = pending.filter((t) => t.set === "fus"); // FU1 / FU2 / FU3; Day 1 / Day 2 attendee calls have their own page
   const todayCount = fuOnly.filter(isDueToday).length, attendCount = pending.length - fuOnly.length, followCount = fuOnly.length - todayCount;
+  // Attendee follow-ups are grouped in the sidebar: one entry per workshop day, each with its own pending count
+  const nDays = dayCount(cfg, leads);
+  const dayCountOf = (d) => pending.filter((t) => t.set === "d" + d + "Fus").length;
+  const attendeeGroup = {
+    label: "Attendee Follow-ups", icon: "attfu", to: "/attendee-followups/1", badge: attendCount,
+    children: Array.from({ length: nDays }, (_, i) => ({ to: "/attendee-followups/" + (i + 1), label: "Day " + (i + 1), badge: dayCountOf(i + 1) })),
+  };
+  // Dashboard and Activity are not in the sidebar any more (their pages still work if opened by link).
   const links = [
     ...(admin ? [{ to: "/board", label: "Daily Board", icon: "board" }] : []),
     ...(admin ? [{ to: "/performance", label: "Team Performance", icon: "perf" }] : []),
     ...(admin ? [{ to: "/reports", label: "Reports", icon: "reports" }] : []),
-    { to: "/dashboard", label: "Dashboard", icon: "dashboard" },
     { to: "/tasks", label: "Today Follow-ups", icon: "tasks", badge: todayCount },
     { to: "/followups", label: "Delayed Follow-ups", icon: "followups", badge: followCount },
-    { to: "/attendee-followups", label: "Attendee Follow-ups", icon: "attfu", badge: attendCount },
+    attendeeGroup,
+    ...(admin ? [{ to: "/razorpay-payments", label: "Razorpay Payments", icon: "payments" }] : []),
     { to: "/leads", label: "Leads", icon: "leads" },
     { to: "/bookings", label: "New Bookings", icon: "bookings" },
     { to: "/attendance", label: "Attendance", icon: "attend" },
-    { to: "/activity", label: "Activity", icon: "activity" },
     ...(!admin ? [{ to: "/reports", label: "My Reports", icon: "reports" }] : []),
-    ...(admin ? [{ to: "/payments", label: "Payments", icon: "payments" }] : []),
     ...(admin ? [{ to: "/team", label: "Team", icon: "team" }, { to: "/settings", label: "Settings", icon: "settings" }] : []),
   ];
+  const { pathname } = useLocation();
   const home = admin ? "board" : "tasks";
   const guard = (el) => (admin ? el : <Navigate to={"/" + home} replace />);
 
@@ -126,17 +133,44 @@ function Shell() {
         </div>
 
         <nav>
-          {links.map((l) => (
-            <NavLink key={l.to + l.label} to={l.to} title={collapsed ? l.label : undefined}
-              className={({ isActive }) => "nav-link" + (isActive ? " active" : "")} onClick={() => setMobileOpen(false)}>
+          {links.map((l) => {
+            const icon = (
               <span className="nav-icon-wrap">
                 <svg className="nav-icon" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d={I[l.icon]} /></svg>
                 {l.badge > 0 && collapsed && <span className="nav-icon-dot" aria-hidden="true" />}
               </span>
-              {!collapsed && <span className="nav-label">{l.label}</span>}
-              {l.badge > 0 && !collapsed && <span className="nav-badge">{l.badge > 99 ? "99+" : l.badge}</span>}
-            </NavLink>
-          ))}
+            );
+            const badge = l.badge > 0 && !collapsed && <span className="nav-badge">{l.badge > 99 ? "99+" : l.badge}</span>;
+            if (l.children) {
+              // group header (not a link when the sidebar is open) + indented children with a guide line
+              const inGroup = pathname.startsWith("/attendee-followups");
+              return (
+                <div key={l.label} className={"nav-group" + (inGroup ? " open" : "")}>
+                  {collapsed
+                    ? <NavLink to={l.to} title={l.label} className={() => "nav-link" + (inGroup ? " active" : "")} onClick={() => setMobileOpen(false)}>{icon}</NavLink>
+                    : <div className={"nav-group-head" + (inGroup ? " on" : "")}>{icon}<span className="nav-label">{l.label}</span>{badge}</div>}
+                  {!collapsed && (
+                    <div className="nav-sub">
+                      {l.children.map((c) => (
+                        <NavLink key={c.to} to={c.to} className={({ isActive }) => "nav-link nav-sublink" + (isActive ? " active" : "")} onClick={() => setMobileOpen(false)}>
+                          <span className="nav-label">{c.label}</span>
+                          {c.badge > 0 && <span className="nav-badge">{c.badge > 99 ? "99+" : c.badge}</span>}
+                        </NavLink>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            }
+            return (
+              <NavLink key={l.to + l.label} to={l.to} title={collapsed ? l.label : undefined}
+                className={({ isActive }) => "nav-link" + (isActive ? " active" : "")} onClick={() => setMobileOpen(false)}>
+                {icon}
+                {!collapsed && <span className="nav-label">{l.label}</span>}
+                {badge}
+              </NavLink>
+            );
+          })}
         </nav>
 
         <div className="sidebar-user">
@@ -173,12 +207,14 @@ function Shell() {
               <Route path="dashboard" element={<Dashboard />} />
               <Route path="tasks" element={<Tasks />} />
               <Route path="followups" element={<FollowUps />} />
-              <Route path="attendee-followups" element={<AttendeeFollowUps />} />
+              <Route path="attendee-followups" element={<Navigate to="/attendee-followups/1" replace />} />
+              <Route path="attendee-followups/:n" element={<AttendeeFollowUps />} />
               <Route path="leads" element={<LeadList />} />
               <Route path="attendance" element={<Attendance />} />
               <Route path="activity" element={<Activity />} />
               <Route path="bookings" element={<Bookings />} />
-              <Route path="payments" element={guard(<Payments />)} />
+              <Route path="razorpay-payments" element={guard(<Payments />)} />
+              <Route path="payments" element={<Navigate to="/razorpay-payments" replace />} />
               <Route path="team" element={guard(<Team />)} />
               <Route path="settings" element={guard(<Settings />)} />
               <Route path="account" element={<Account />} />
