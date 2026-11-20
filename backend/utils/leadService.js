@@ -31,7 +31,11 @@ export const DEF = {
   workStart: "09:00", workEnd: "19:00", skipSunday: true,
   plan: [{ days: 0, time: "16:00" }, { days: 1, time: "11:00" }, { days: 2, time: "11:00" }],
   statuses: ["Connected", "DNP", "Out of service", "Invalid", "Call Later", "Not interested", "Callback", "Wrong number"],
-  attPlan: [{ days: 0, time: "16:00" }, { days: 1, time: "11:00" }], // Day 1 / Day 2 attendee follow-ups
+  attPlan: [{ days: 0, time: "16:00" }, { days: 1, time: "11:00" }], // attendee follow-ups after each workshop day (Day 1 / 2 / 3)
+  // Settings -> Workshops: how many days each workshop runs (1 / 2 / 3) and how many follow-ups follow each day (0 = automatic:
+  // 1 for a 1-day workshop, the whole attendee plan otherwise). wsDefault applies to workshops that are not listed.
+  workshops: [], // [{ name, days, fu }]
+  wsDefault: { days: 2, fu: 0 },
   retryStatuses: ["DNP", "Out of service"], retryHours: 3, // automation: unanswered -> next follow-up pulled forward
   closeStatuses: ["Not interested", "Wrong number"], // automation: remaining follow-ups auto-closed
   escalateHours: 4, // automation: overdue this long -> flagged to admin
@@ -45,7 +49,7 @@ export const DEF = {
   share: { auto: false, time: "09:00", people: null, off: [], offDate: "", lastRun: "", lastResult: null },
   assign: {
     keepSame: true, // Day 1 / Day 2 calls stay with the lead's own caller when that caller is ticked there too
-    queues: { new: { mode: "auto", people: [] }, d1: { mode: "off", people: [] }, d2: { mode: "off", people: [] } },
+    queues: { new: { mode: "auto", people: [] }, d1: { mode: "off", people: [] }, d2: { mode: "off", people: [] }, d3: { mode: "off", people: [] } },
   },
 };
 export const getCfg = async () => {
@@ -66,10 +70,10 @@ export const nameRe = (user) => new RegExp("^" + esc(leadCallerName(user) || "~"
 export const mineFilter = (user) => {
   if (user.leadAdmin) return {};
   const re = nameRe(user);
-  return { $or: [{ assignedTo: re }, { d1Assigned: re }, { d2Assigned: re }] };
+  return { $or: [{ assignedTo: re }, { d1Assigned: re }, { d2Assigned: re }, { d3Assigned: re }] };
 };
 export const ownsLead = (user, l) =>
-  user.leadAdmin || [l.assignedTo, l.d1Assigned, l.d2Assigned].some((x) => (x || "").toLowerCase() === leadCallerName(user).toLowerCase());
+  user.leadAdmin || [l.assignedTo, l.d1Assigned, l.d2Assigned, l.d3Assigned].some((x) => (x || "").toLowerCase() === leadCallerName(user).toLowerCase());
 
 // ---------------------------------------------------------------------------
 // Lead story (shown in the lead drawer) + small cleaners
@@ -81,10 +85,15 @@ export const trail = (l, type, text, by = "System") => {
 export const trailOp = (type, text, by = "System") => ({ $each: [{ at: new Date(), type, text, by }], $slice: -100 });
 export const plain = (l) => { const o = l.toObject ? l.toObject() : { ...l }; delete o.trail; return o; };
 
-export const byPhone = (n) => Lead.findOne({ $or: [{ phone10: n }, { key: n }, { key: "91" + n }] });
+// One person can register again and again (every registration is its own lead), so a phone / email can match SEVERAL leads.
+// byPhone / byEmail give the newest registration; byPhoneAll / byEmailAll give them all (newest first).
+const phoneQ = (n) => ({ $or: [{ phone10: n }, { key: n }, { key: "91" + n }, { key: new RegExp("^(91)?" + n + "#") }] });
+export const byPhone = (n) => Lead.findOne(phoneQ(n)).sort({ ts: -1 });
+export const byPhoneAll = (n) => Lead.find(phoneQ(n)).sort({ ts: -1 });
 export const normEmail = (e) => String(e || "").trim().toLowerCase();
 export const isEmail = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normEmail(e));
-export const byEmail = (e) => Lead.findOne({ emailKey: normEmail(e) });
+export const byEmail = (e) => Lead.findOne({ emailKey: normEmail(e) }).sort({ ts: -1 });
+export const byEmailAll = (e) => Lead.find({ emailKey: normEmail(e) }).sort({ ts: -1 });
 // older leads were saved before emailKey existed — fill it in once (cheap no-op afterwards)
 // (new leads always get it from the save hook, so once per server start is enough — not on every 1-minute import)
 let emailKeysDone = false;
@@ -114,7 +123,34 @@ export const planFor = (ts, cfg, plan = cfg.plan) =>
     l.setUTCHours(h, m, 0, 0);
     return { planned: adj(U(l), cfg) };
   });
-export const attFus = (cfg) => planFor(new Date(), cfg, cfg.attPlan);
+export const DAYS = [1, 2, 3];
+export const ATTSETS = DAYS.map((d) => `d${d}Fus`); // d1Fus / d2Fus / d3Fus
+export const ALLSETS = ["fus", ...ATTSETS];
+export const ownerField = (set) => (set === "fus" ? "assignedTo" : `d${set[1]}Assigned`);
+export const setOwner = (l, set) => (set === "fus" ? "" : l[ownerField(set)] || "");
+// Settings -> Workshops: days (1-3) and attendee follow-ups per day for a workshop (matched by name, any capitalisation).
+export function wsInfo(cfg, name) {
+  const key = cleanWorkshop(name).toLowerCase(), hit = key && (cfg.workshops || []).find((w) => String(w.name || "").toLowerCase() === key);
+  const base = { ...DEF.wsDefault, ...(cfg.wsDefault || {}) }, days = Math.min(3, Math.max(1, Math.floor(Number(hit?.days ?? base.days)) || 2));
+  const want = Math.floor(Number(hit ? hit.fu : base.fu)) || 0, max = cfg.attPlan?.length || 1;
+  return { days, fu: Math.min(max, Math.max(1, want || (days === 1 ? 1 : max))), listed: !!hit };
+}
+// the follow-ups a new attendee gets: the attendee plan, cut to what this workshop needs (1 for a 1-day workshop)
+export const attFus = (cfg, workshop) => planFor(new Date(), cfg, cfg.attPlan).slice(0, wsInfo(cfg, workshop).fu);
+export function cleanWorkshops(list, attLen = MAX_FU) {
+  const seen = new Set();
+  return (Array.isArray(list) ? list : []).flatMap((w) => {
+    const name = cleanWorkshop(w?.name), low = name.toLowerCase();
+    if (!name || seen.has(low)) return [];
+    seen.add(low);
+    const days = Math.floor(Number(w.days)), fu = Math.floor(Number(w.fu)) || 0;
+    return [{ name, days: days >= 1 && days <= 3 ? days : 2, fu: Math.min(attLen, Math.max(0, fu)) }];
+  });
+}
+export function cleanWsDefault(d) {
+  const days = Math.floor(Number(d?.days)), fu = Math.floor(Number(d?.fu)) || 0;
+  return { days: days >= 1 && days <= 3 ? days : 2, fu: Math.max(0, fu) };
+}
 
 // A lead that has JUST arrived (sheet row, manual add, payment) starts in FU1 immediately: FU1 is due right now — not
 // "16:00 today", and not pushed to Monday because it arrived on a Sunday or after working hours — and the later
@@ -145,28 +181,30 @@ const fresh = (planned, cfg, now) => (planned < now ? adj(now, cfg) : planned);
 export async function addStepsToExistingLeads(cfg) {
   const now = new Date(), ops = [];
   let leads = 0, steps = 0, removed = 0;
-  for await (const l of Lead.find({}, "ts fus d1Fus d2Fus").lean().cursor()) {
+  for await (const l of Lead.find({}, "ts workshop fus d1Fus d2Fus d3Fus").lean().cursor()) {
     const $push = {}, $set = {};
-    const sync = (set, plan, base) => {
+    // target = how many steps this lead should have: lead calls follow the lead plan; attendee calls follow the attendee plan
+    // cut to what the lead's WORKSHOP needs (Settings -> Workshops)
+    const sync = (set, plan, base, target) => {
       const cur = l[set] || [];
       if (!cur.length) return;
-      if (cur.length > plan.length) {
+      if (cur.length > target) {
         // a step was REMOVED in Settings: drop the pending steps beyond the plan (calls already made stay as history)
-        const keep = cur.filter((f, i) => i < plan.length || f.actual);
+        const keep = cur.filter((f, i) => i < target || f.actual);
         if (keep.length !== cur.length) { $set[set] = keep; removed += cur.length - keep.length; }
         return;
       }
-      if (cur.length === plan.length) return;
+      if (cur.length === target) return;
       const closed = cur.some((f) => f.skipped); // auto-closed lead (Not interested / Wrong number): new steps stay closed
       const slots = planFor(base, cfg, plan);
-      $push[set] = { $each: slots.slice(cur.length).map((x) => ({ planned: fresh(x.planned, cfg, now), ...(closed ? { skipped: true } : {}) })) };
-      steps += plan.length - cur.length;
+      $push[set] = { $each: slots.slice(cur.length, target).map((x) => ({ planned: fresh(x.planned, cfg, now), ...(closed ? { skipped: true } : {}) })) };
+      steps += target - cur.length;
     };
-    sync("fus", cfg.plan, l.ts || now);
+    sync("fus", cfg.plan, l.ts || now, cfg.plan.length);
     // attendee follow-ups were planned from the day the person was marked present = the day of their first step
-    for (const set of ["d1Fus", "d2Fus"]) {
+    for (const set of ATTSETS) {
       const first = (l[set] || [])[0]?.planned;
-      if (first) sync(set, cfg.attPlan, new Date(+new Date(first) - (+cfg.attPlan[0].days || 0) * 864e5));
+      if (first) sync(set, cfg.attPlan, new Date(+new Date(first) - (+cfg.attPlan[0].days || 0) * 864e5), Math.min(cfg.attPlan.length, wsInfo(cfg, l.workshop).fu));
     }
     const update = {};
     if (Object.keys($push).length) update.$push = $push;
@@ -219,7 +257,7 @@ export async function callerNames() {
 // ---------------------------------------------------------------------------
 // Automatic assignment (weighted round-robin, set up in Settings)
 // ---------------------------------------------------------------------------
-export const QUEUES = ["new", "d1", "d2"];
+export const QUEUES = ["new", "d1", "d2", "d3"];
 export function cleanAssign(a) {
   const out = { keepSame: a?.keepSame !== false, queues: {} };
   for (const k of QUEUES) {
@@ -268,6 +306,32 @@ export async function assigner(queue, cfgIn) {
     save: () => LeadConfig.findByIdAndUpdate(ASSIGN_STATE, { v: state }, { upsert: true }).catch(() => {}),
   };
 }
+// Deal n items to people by a ratio, exactly: 100 items at 2 : 1 : 1 -> 50 / 25 / 25 (the leftovers go to the biggest remainders).
+// Returns one name per item, interleaved so nobody gets all their items in one block. people: [{ name, share }]
+export function dealByRatio(n, people) {
+  if (!n || !people.length) return [];
+  const tot = people.reduce((a, p) => a + p.share, 0), quota = people.map((p) => (n * p.share) / tot), give = quota.map(Math.floor);
+  let left = n - give.reduce((a, b) => a + b, 0);
+  quota.map((q, i) => [q - Math.floor(q), i]).sort((a, b) => b[0] - a[0] || a[1] - b[1]).slice(0, left).forEach(([, i]) => give[i]++);
+  const got = people.map(() => 0), out = [];
+  for (let k = 0; k < n; k++) {
+    let bi = -1, bv = Infinity;
+    give.forEach((g, i) => { if (got[i] < g && got[i] / g < bv) { bv = got[i] / g; bi = i; } });
+    got[bi]++; out.push(people[bi].name);
+  }
+  return out;
+}
+export function cleanDealPeople(list) {
+  const seen = new Set();
+  return (Array.isArray(list) ? list : []).flatMap((p) => {
+    const name = String(p?.name || "").trim().slice(0, 80), low = name.toLowerCase();
+    if (!name || seen.has(low)) return [];
+    seen.add(low);
+    const share = Math.floor(Number(p.share));
+    return [{ name, share: Number.isFinite(share) ? Math.max(1, Math.min(100, share)) : 1 }];
+  });
+}
+
 // Day 1 / Day 2 calls: give them their own caller when that column is on Auto
 export function autoAssignDay(l, d, A) {
   if (!A.on || l[`d${d}Assigned`]) return;
@@ -282,12 +346,12 @@ export async function reshare(queue) {
   const cfg = await getCfg(), A = await assigner(queue, cfg);
   if (!A.on) throw Object.assign(new Error("Set this column to Auto and tick at least one present person first"), { status: 400 });
   A.reset();
-  const d = queue === "d2" ? 2 : 1, now = new Date(), ops = [];
+  const d = Number(queue[1]) || 1, now = new Date(), ops = [];
   const filter = queue === "new"
     ? { locked: { $ne: true }, "fus.actual": { $exists: false }, $or: [{ assignedTo: { $in: [null, ""] } }, { assignedBy: "auto" }] }
     : { ["day" + d]: true, [`d${d}Fus.actual`]: { $exists: false }, $or: [{ [`d${d}Assigned`]: { $in: [null, ""] } }, { [`d${d}By`]: "auto" }] };
   let total = 0, moved = 0;
-  for await (const l of Lead.find(filter, "assignedTo d1Assigned d2Assigned").sort({ ts: 1 }).lean().cursor()) {
+  for await (const l of Lead.find(filter, "assignedTo d1Assigned d2Assigned d3Assigned").sort({ ts: 1 }).lean().cursor()) {
     total++;
     const field = queue === "new" ? "assignedTo" : `d${d}Assigned`, name = A.pick(queue === "new" ? "" : l.assignedTo);
     if (!name || name === l[field]) continue;
@@ -402,19 +466,24 @@ export async function syncIntake(by = null) {
     const ix = { ts: col(/timestamp/), name: col(/^(?!.*workshop).*name/), email: col(/email/), phone: col(/phone/), utw: col(/utw/), asg: col(/assigned/), ws: col(/workshop/), lvl: col(/level/), pro: col(/profession/), city: col(/city/), link: col(/whatsapp.*link/), sent: col(/msg.*sent/) };
     const cell = (r, i) => (i >= 0 ? String(r[i] ?? "").trim() : "");
 
-    const data = rows.slice(hi + 1).map((r) => ({ r, phone: cell(r, ix.phone).replace(/\D/g, "") })).filter((x) => x.phone);
+    // oldest row first, so a person who registered twice in one batch gets their registrations in the right order
+    const data = rows.slice(hi + 1).map((r) => ({ r, phone: cell(r, ix.phone).replace(/\D/g, ""), rowTs: pdate(cell(r, ix.ts)) })).filter((x) => x.phone).sort((a, b) => (+a.rowTs || 0) - (+b.rowTs || 0));
     await backfillEmailKeys();
-    // one query for every existing lead instead of one per row — matched by phone AND by email
+    // one query for every existing lead instead of one per row — matched by phone AND by email.
+    // One person can have SEVERAL leads (one per registration), so these maps hold lists.
     const tens = [...new Set(data.map((x) => x.phone.slice(-10)))];
     const mails = [...new Set(data.map((x) => normEmail(cell(x.r, ix.email))).filter(Boolean))];
     const existing = new Map(), existingMail = new Map();
-    const remember = (l) => { existing.set(l.phone10 || l.key.slice(-10), l); if (l.emailKey) existingMail.set(l.emailKey, l); };
+    const addTo = (m, k, l) => { if (!k) return; const a = m.get(k) || []; if (!a.includes(l)) { a.push(l); m.set(k, a); } };
+    const remember = (l) => { addTo(existing, l.phone10 || l.key.slice(-10), l); addTo(existingMail, l.emailKey, l); };
+    const seenIds = new Map(); // the same document must be ONE object, however it was found
+    const keep = (l) => { const k = String(l._id); if (!seenIds.has(k)) seenIds.set(k, l); return seenIds.get(k); };
     for (let i = 0; i < tens.length; i += 1000) {
       const part = tens.slice(i, i + 1000);
-      for (const l of await Lead.find({ $or: [{ phone10: { $in: part } }, { key: { $in: [...part, ...part.map((n) => "91" + n)] } }] })) remember(l);
+      for (const l of await Lead.find({ $or: [{ phone10: { $in: part } }, { key: { $in: [...part, ...part.map((n) => "91" + n)] } }] })) remember(keep(l));
     }
     for (let i = 0; i < mails.length; i += 1000)
-      for (const l of await Lead.find({ emailKey: { $in: mails.slice(i, i + 1000) } })) if (!existingMail.has(l.emailKey)) { existingMail.set(l.emailKey, l); if (!existing.has(l.phone10 || l.key.slice(-10))) existing.set(l.phone10 || l.key.slice(-10), l); }
+      for (const l of await Lead.find({ emailKey: { $in: mails.slice(i, i + 1000) } })) remember(keep(l));
 
     // workshop names: "Delhi Workshop" and "delhi  workshop" are the same filter — the first spelling that was used wins
     const wsCanon = new Map((await Lead.distinct("workshop")).filter(Boolean).map((w) => [w.toLowerCase(), w]));
@@ -425,17 +494,29 @@ export async function syncIntake(by = null) {
     const newLeads = []; // leads created by THIS import (used to send the arrival WhatsApp)
     const touched = new Set(); // leads already handled in this import
     const rowErrors = [];
-    for (const { r, phone } of data) {
+    const regTs = (l) => +(l.sheetSeenTs || l.ts || 0);
+    for (const { r, phone, rowTs } of data) {
      try { // one bad row must never stop the other leads from arriving
       const f = { name: cell(r, ix.name), email: cell(r, ix.email), utwDate: cell(r, ix.utw), level: cell(r, ix.lvl), profession: cell(r, ix.pro), city: cell(r, ix.city), workshop: canonWs(cell(r, ix.ws)), waLink: cell(r, ix.link) };
       const sentCell = cell(r, ix.sent); // "Sent …": a message (e.g. from Pabbly) already went out for this row — never send it again
       const sheetAsg = cell(r, ix.asg), ten = phone.slice(-10), mail = normEmail(f.email);
-      // same phone -> same lead; otherwise the same email -> same lead (its phone is then corrected from the sheet)
-      let ex = existing.get(ten), viaEmail = false;
-      if (!ex && mail && existingMail.has(mail)) {
-        ex = existingMail.get(mail); viaEmail = true;
+      // Everyone this person has been so far: same phone, or the same email (typed with a new phone number)
+      const byTen = existing.get(ten) || [], cands = [...new Set([...byTen, ...(mail ? existingMail.get(mail) || [] : [])])];
+      const viaEmail = !byTen.length && cands.length > 0;
+      let ex = null, fresh = false, latest = null;
+      if (cands.length) {
+        latest = cands.reduce((b, l) => (regTs(l) > regTs(b) ? l : b));
+        // the row of a registration we already have: its timestamp is the registration's timestamp
+        if (rowTs) ex = cands.find((l) => Math.abs(regTs(l) - rowTs) <= 1000 || Math.abs(+(l.ts || 0) - rowTs) <= 1000) || null;
+        // A NEWER row (made in the last 24 h) = the same person registering AGAIN — for the same workshop or another one.
+        // It is a registration of its own: new lead, new follow-ups, new attendance. A second row within 10 minutes for the same
+        // workshop is a double click on the form, not a new registration.
+        const twin = f.workshop && (latest.workshop || "").toLowerCase() === f.workshop.toLowerCase() && rowTs && rowTs - regTs(latest) < 10 * 6e4;
+        fresh = !ex && !!rowTs && rowTs - regTs(latest) > 1000 && Date.now() - rowTs < 864e5 && Date.now() - rowTs > -36e5 && !twin;
+        // old / unmatched row: a person with ONE lead is updated as before; with several leads it is history — nothing to apply
+        if (!ex && !fresh) { if (cands.length === 1) ex = cands[0]; else continue; }
         // the same person typed twice with two phone numbers: the first row wins, so the number doesn't flip back and forth on every import
-        if (touched.has(ex)) continue;
+        if (ex && viaEmail && touched.has(ex)) continue;
       }
       if (ex) {
         touched.add(ex);
@@ -451,28 +532,21 @@ export async function syncIntake(by = null) {
           trail(ex, "assign", ex.assignedTo ? `Reassigned from ${ex.assignedTo} to ${sheetAsg} (from the sheet)` : `Assigned to ${sheetAsg} (from the sheet)`);
           ex.assignedTo = sheetAsg; ex.assignedBy = "sheet"; ex.assignedAt = new Date();
         }
-        // The SAME person on a NEW sheet row (a later Timestamp, made in the last 24 h) = a fresh enquiry: back to FU1, due now.
-        // (A row that was already applied — or an old row — never triggers this, so re-reading the sheet every minute changes nothing.)
-        const rowTs = pdate(cell(r, ix.ts)), seen = ex.sheetSeenTs || ex.ts;
-        if (rowTs && seen && rowTs - seen > 1000 && Date.now() - rowTs < 864e5 && Date.now() - rowTs > -36e5) {
-          ex.fus = planNew(new Date(), cfg);
-          ex.sheetSeenTs = rowTs;
-          if (!sentCell) { ex.waWelcomeAt = undefined; ex.msgSent = ""; } // a new enquiry gets its own welcome message
-          trail(ex, "entered", `Enquired again (new row in the sheet)${f.workshop ? " · " + f.workshop : ""} — follow-ups restarted, FU1 due now`, "System");
-          newLeads.push({ id: String(ex._id), owner: ex.assignedTo, ts: rowTs }); again++;
-        }
         if (ex.isModified()) { await ex.save(); updated++; if (viaEmail) byEmailMatched++; }
-        remember(ex); existing.set(ten, ex);
+        remember(ex);
       } else {
-        const ts = pdate(cell(r, ix.ts)) || new Date();
-        const autoName = sheetAsg ? "" : A.pick(), owner = sheetAsg || autoName;
-        const story = [{ at: new Date(), type: "entered", text: `Lead came in from the sheet${f.workshop ? " · " + f.workshop : ""}`, by: "System" }];
+        const ts = rowTs || new Date(), n = cands.length + 1;
+        // a returning person keeps their caller when "keep with the same person" is on (the caller who knows them)
+        const autoName = sheetAsg ? "" : A.pick(latest?.assignedTo), owner = sheetAsg || autoName;
+        const story = [{ at: new Date(), type: "entered", text: n > 1 ? `Registered again (registration #${n})${f.workshop ? " · " + f.workshop : ""} — new row in the sheet` : `Lead came in from the sheet${f.workshop ? " · " + f.workshop : ""}`, by: "System" }];
         if (owner) story.push({ at: new Date(), type: "assign", text: `Assigned to ${owner} (${sheetAsg ? "from the sheet" : "automatic"})`, by: "System" });
-        const lead = await Lead.create({ ...f, key: phone, phone, ts, source: "sheet", assignedTo: owner, assignedBy: owner ? (sheetAsg ? "sheet" : "auto") : undefined, assignedAt: owner ? new Date() : undefined, fus: planNew(ts, cfg), trail: story, ...(sentCell ? { waWelcomeAt: new Date(), msgSent: sentCell } : {}) });
-        remember(lead); touched.add(lead);
-        added++; newLeads.push({ id: String(lead._id), owner, ts });
+        // the first registration keeps the plain phone number as its key; later ones get "<phone>#<time>"
+        const key = cands.length ? `${phone}#${+ts}` : phone;
+        const lead = await Lead.create({ ...f, key, phone, ts, sheetSeenTs: rowTs || undefined, source: "sheet", assignedTo: owner, assignedBy: owner ? (sheetAsg ? "sheet" : "auto") : undefined, assignedAt: owner ? new Date() : undefined, fus: planNew(ts, cfg), trail: story, ...(sentCell ? { waWelcomeAt: new Date(), msgSent: sentCell } : {}) });
+        remember(keep(lead)); touched.add(lead);
+        added++; if (n > 1) again++; newLeads.push({ id: String(lead._id), owner, ts });
       }
-     } catch (e) { rowErrors.push(`${phone}: ${e.code === 11000 ? "duplicate phone number" : e.message}`); console.error("[sheet] row skipped:", phone, e.message); }
+     } catch (e) { rowErrors.push(`${phone}: ${e.code === 11000 ? "duplicate registration" : e.message}`); console.error("[sheet] row skipped:", phone, e.message); }
     }
     await A.save();
     const res = { added, updated, byEmailMatched, again, rows: data.length, ok: true, ...(rowErrors.length ? { rowErrors: rowErrors.slice(0, 5), skippedRows: rowErrors.length } : {}) };
@@ -498,8 +572,8 @@ export async function syncIntake(by = null) {
 // ---------------------------------------------------------------------------
 export const logAct = (l, step, f, by, set) =>
   LeadActivity.create({
-    stage: set === "d1Fus" ? "Day 1" : set === "d2Fus" ? "Day 2" : "Lead", key: l.key, name: l.name,
-    caller: (set === "d1Fus" ? l.d1Assigned : set === "d2Fus" ? l.d2Assigned : "") || l.assignedTo,
+    stage: set === "fus" ? "Lead" : `Day ${set[1]}`, key: l.key, name: l.name,
+    caller: setOwner(l, set) || l.assignedTo,
     step, status: f.status, note: f.note, at: f.actual, by, delayMs: Math.max(0, f.actual - f.planned),
   });
 
@@ -513,9 +587,9 @@ export async function board() {
   const r = (k) => (R[k || "Unassigned"] ||= { caller: k || "Unassigned", leads: 0, due: 0, done: 0, overdue: 0, escalated: 0, callbacks: 0 });
   for (const l of leads) {
     const x = r(l.assignedTo); x.leads++; if (l.ts >= sod) newToday++;
-    ["fus", "d1Fus", "d2Fus"].forEach((set) => (l[set] || []).forEach((f, i, arr) => {
+    ALLSETS.forEach((set) => (l[set] || []).forEach((f, i, arr) => {
       if (f.actual || f.skipped || !f.planned || i >= planLen(cfg, set) || (i && !arr[i - 1].actual && !arr[i - 1].skipped)) return;
-      const y = r((set === "d1Fus" ? l.d1Assigned : set === "d2Fus" ? l.d2Assigned : "") || l.assignedTo), p = new Date(f.planned);
+      const y = r(setOwner(l, set) || l.assignedTo), p = new Date(f.planned);
       if (p <= eod) y.due++;
       if (p < now) {
         y.overdue++;
@@ -561,7 +635,7 @@ export async function progress() {
   const cfg = await getCfg(), now = new Date(), sod = startOfDay(now), eod = endOfDay(now);
   const open = { $elemMatch: { actual: { $exists: false }, planned: { $lte: eod } } };
   const [leads, acts, users] = await Promise.all([
-    Lead.find({ $or: [{ fus: open }, { d1Fus: open }, { d2Fus: open }] }, "assignedTo d1Assigned d2Assigned fus d1Fus d2Fus").lean(),
+    Lead.find({ $or: ALLSETS.map((k) => ({ [k]: open })) }, "assignedTo d1Assigned d2Assigned d3Assigned fus d1Fus d2Fus d3Fus").lean(),
     LeadActivity.find({ at: { $gte: sod } }, "caller status at").lean(),
     User.find({ active: { $ne: false } }).lean(),
   ]);
@@ -570,10 +644,10 @@ export async function progress() {
   const everyone = new Set(users.filter((u) => u.role !== "admin").map((u) => leadCallerName(u).toLowerCase()).filter(Boolean));
   everyone.forEach((k) => r(k)); // every caller is on the board, even before their first task
   for (const l of leads)
-    for (const set of ["fus", "d1Fus", "d2Fus"])
+    for (const set of ALLSETS)
       (l[set] || []).forEach((f, i, arr) => {
         if (f.actual || f.skipped || !f.planned || i >= planLen(cfg, set) || (i && !arr[i - 1].actual && !arr[i - 1].skipped) || new Date(f.planned) > eod) return;
-        const x = r((set === "d1Fus" ? l.d1Assigned : set === "d2Fus" ? l.d2Assigned : "") || l.assignedTo);
+        const x = r(setOwner(l, set) || l.assignedTo);
         if (x) x.left++;
       });
   for (const a of acts) {
@@ -594,14 +668,14 @@ export async function progress() {
 // Light numbers for the app chooser card.
 export async function stats(user) {
   const cfg = await getCfg(), now = new Date(), eod = endOfDay(now);
-  const leads = await Lead.find(mineFilter(user), "assignedTo d1Assigned d2Assigned fus d1Fus d2Fus").lean();
+  const leads = await Lead.find(mineFilter(user), "assignedTo d1Assigned d2Assigned d3Assigned fus d1Fus d2Fus d3Fus").lean();
   const me = leadCallerName(user).toLowerCase();
   let due = 0, overdue = 0, unassigned = 0;
   for (const l of leads) {
     if (!l.assignedTo) unassigned++;
-    ["fus", "d1Fus", "d2Fus"].forEach((set) => (l[set] || []).forEach((f, i, arr) => {
+    ALLSETS.forEach((set) => (l[set] || []).forEach((f, i, arr) => {
       if (f.actual || f.skipped || !f.planned || i >= planLen(cfg, set) || (i && !arr[i - 1].actual && !arr[i - 1].skipped)) return;
-      const who = ((set === "d1Fus" ? l.d1Assigned : set === "d2Fus" ? l.d2Assigned : "") || l.assignedTo || "").toLowerCase();
+      const who = (setOwner(l, set) || l.assignedTo || "").toLowerCase();
       if (!user.leadAdmin && who !== me) return;
       const p = new Date(f.planned);
       if (p <= eod) due++;
@@ -644,7 +718,7 @@ const sumRow = (x) => {
 };
 async function perfRange(from, to, cfg, users, now) {
   const inR = { $elemMatch: { planned: { $gte: from, $lte: to } } };
-  const leads = await Lead.find({ $or: [{ fus: inR }, { d1Fus: inR }, { d2Fus: inR }] }, "assignedTo d1Assigned d2Assigned fus d1Fus d2Fus").lean();
+  const leads = await Lead.find({ $or: ALLSETS.map((k) => ({ [k]: inR })) }, "assignedTo d1Assigned d2Assigned d3Assigned fus d1Fus d2Fus d3Fus").lean();
   const show = new Map(users.map((u) => [leadCallerName(u).toLowerCase(), u])), R = {};
   const r = (n) => {
     const k = String(n || "").trim().toLowerCase();
@@ -654,13 +728,13 @@ async function perfRange(from, to, cfg, users, now) {
   };
   users.filter((u) => u.role !== "admin").forEach((u) => r(leadCallerName(u)));
   for (const l of leads)
-    for (const set of ["fus", "d1Fus", "d2Fus"])
+    for (const set of ALLSETS)
       (l[set] || []).forEach((f, i, arr) => {
         if (f.skipped || !f.planned || i >= planLen(cfg, set)) return;
         const p = new Date(f.planned);
         if (p < from || p > to) return;
         if (!f.actual && i && !arr[i - 1].actual && !arr[i - 1].skipped) return; // not actionable yet (the call before it is still pending)
-        const x = r((set === "d1Fus" ? l.d1Assigned : set === "d2Fus" ? l.d2Assigned : "") || l.assignedTo);
+        const x = r(setOwner(l, set) || l.assignedTo);
         if (!x) return;
         x.assigned++;
         if (f.actual) (new Date(f.actual) <= +p + GRACE ? x.onTime++ : x.late++);
@@ -692,7 +766,7 @@ export async function performance(fromYmd, toYmd) {
 export async function clearDelayed() {
   const sod = startOfDay(new Date());
   let calls = 0;
-  for (const set of ["fus", "d1Fus", "d2Fus"]) {
+  for (const set of ALLSETS) {
     const r = await Lead.updateMany(
       { [set]: { $elemMatch: { actual: null, skipped: { $ne: true }, planned: { $lt: sod } } } },
       { $set: { [`${set}.$[e].skipped`]: true } },
@@ -725,13 +799,13 @@ export async function spreadToday(names) {
   const cfg = await getCfg(), now = new Date(), sod = startOfDay(now), eod = endOfDay(now);
   const low = new Map(people.map((n) => [n.toLowerCase(), n])), load = new Map(people.map((n) => [n, 0]));
   const open = { $elemMatch: { actual: null, skipped: { $ne: true }, planned: { $gte: sod, $lte: eod } } };
-  const leads = await Lead.find({ $or: [{ fus: open }, { d1Fus: open }, { d2Fus: open }] }, "assignedTo d1Assigned d2Assigned locked fus d1Fus d2Fus").lean();
+  const leads = await Lead.find({ $or: ALLSETS.map((k) => ({ [k]: open })) }, "assignedTo d1Assigned d2Assigned d3Assigned locked fus d1Fus d2Fus d3Fus").lean();
   const units = [], fixed = [];
   for (const l of leads)
-    for (const set of ["fus", "d1Fus", "d2Fus"]) {
+    for (const set of ALLSETS) {
       const hit = (l[set] || []).some((f, i, arr) => !f.actual && !f.skipped && f.planned && i < planLen(cfg, set) && new Date(f.planned) >= sod && new Date(f.planned) <= eod && (!i || arr[i - 1].actual || arr[i - 1].skipped));
       if (!hit) continue;
-      const field = set === "d1Fus" ? "d1Assigned" : set === "d2Fus" ? "d2Assigned" : "assignedTo";
+      const field = ownerField(set);
       const owner = (l[field] || l.assignedTo || "").trim();
       (set === "fus" && l.locked ? fixed : units).push({ l, set, field, owner });
     }
@@ -750,9 +824,9 @@ export async function spreadToday(names) {
   for (const u of units) {
     if (u.to.toLowerCase() === u.owner.toLowerCase()) continue;
     moved++;
-    const by = u.set === "fus" ? { assignedBy: "auto", assignedAt: now } : { [u.set === "d1Fus" ? "d1By" : "d2By"]: "auto" };
+    const by = u.set === "fus" ? { assignedBy: "auto", assignedAt: now } : { [`d${u.set[1]}By`]: "auto" };
     ops.push({ updateOne: { filter: { _id: u.l._id }, update: { $set: { [u.field]: u.to, ...by },
-      $push: { trail: trailOp("assign", `${u.set === "fus" ? "" : u.set === "d1Fus" ? "Day 1 calls " : "Day 2 calls "}${u.owner ? `moved from ${u.owner} to ${u.to}` : `assigned to ${u.to}`} (today's calls shared equally)`) } } } });
+      $push: { trail: trailOp("assign", `${u.set === "fus" ? "" : `Day ${u.set[1]} calls `}${u.owner ? `moved from ${u.owner} to ${u.to}` : `assigned to ${u.to}`} (today's calls shared equally)`) } } } });
     if (ops.length >= 500) await Lead.bulkWrite(ops.splice(0));
   }
   if (ops.length) await Lead.bulkWrite(ops);

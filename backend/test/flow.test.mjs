@@ -134,22 +134,34 @@ await t("new sheet lead is messaged automatically within the run; old history ro
 });
 await t("Connected save does not double-send in arrival mode", async () => { const b = sent.length; const l5 = await Lead.findOne({ phone10: "9444444444" }); const x = await W.triggerWelcome(l5._id, { callerName: "Meera" }); assert.equal(x.status, "skipped"); assert.equal(sent.length, b); });
 
-console.log("Same person, new sheet row (re-enquiry) -> FU1 again");
+console.log("Same person registers again -> a new registration (own lead, own follow-ups)");
 await S.setCfg({ ...(await S.getCfg()), bookingUrl: "", aisensy: { ...(await S.getCfg()).aisensy, enabled: false } });
-await t("a NEW row for a phone that is already a lead brings it back to FU1, due now", async () => {
+await t("a NEW row for a phone that is already a lead = a second registration: new lead in FU1, the first one untouched", async () => {
   const ex = await Lead.findOne({ phone10: "9000000001" }); ex.fus.forEach((f) => { f.actual = new Date(); f.status = "Connected"; }); ex.markModified("fus"); ex.waWelcomeAt = new Date(); await ex.save();
-  rows.push([dmy(new Date()), "Ravi", "", "9000000001", "", "Dolly", "test workshop", "", "", "", "", "", ""]);
-  const r = await SS.runSync(); assert.equal(r.again, 1); assert.equal(r.added, 0);
-  const l = await Lead.findOne({ phone10: "9000000001" }); assert.ok(Math.abs(l.fus[0].planned - Date.now()) < 30_000, "FU1 not due now"); assert.ok(!l.fus[0].actual); assert.equal(l.fus.length, 3);
-  assert.equal(l.name, "Ravi"); assert.equal(l.workshop, "test workshop"); assert.ok(!l.waWelcomeAt); assert.ok(l.trail.some((x) => /Enquired again/.test(x.text)));
+  rows.push([dmy(new Date()), "Ravi", "", "9000000001", "", "Dolly", "second workshop", "", "", "", "", "", ""]);
+  const r = await SS.runSync(); assert.equal(r.again, 1); assert.equal(r.added, 1);
+  const all = await Lead.find({ phone10: "9000000001" }).sort({ ts: 1 }); assert.equal(all.length, 2);
+  assert.ok(all[0].fus[0].actual, "first registration must keep its calls"); assert.notEqual(all[0].key, all[1].key); assert.match(all[1].key, /^9000000001#/);
+  assert.equal(all[1].workshop, "second workshop"); assert.ok(!all[1].fus[0].actual); assert.ok(Math.abs(all[1].fus[0].planned - Date.now()) < 30_000, "FU1 not due now"); assert.equal(all[1].fus.length, 3);
+  assert.ok(all[1].trail.some((x) => /Registered again/.test(x.text)));
 });
-await t("re-reading the same row every minute does NOT restart it again", async () => {
-  const l1 = await Lead.findOne({ phone10: "9000000001" }); l1.fus[0].actual = new Date(); l1.fus[0].status = "DNP"; l1.markModified("fus"); await l1.save();
-  const r = await SS.runSync(); assert.equal(r.again, 0); assert.ok((await Lead.findOne({ phone10: "9000000001" })).fus[0].actual);
+await t("re-reading the same rows every minute creates nothing more", async () => {
+  const r = await SS.runSync(); assert.equal(r.added, 0); assert.equal(r.again, 0); assert.equal(await Lead.countDocuments({ phone10: "9000000001" }), 2);
 });
-await t("an old row for an existing lead never restarts it (no flood after deploy)", async () => {
+await t("a double click on the form (same workshop, minutes apart) is NOT a new registration", async () => {
+  rows.push([dmy(new Date(Date.now() + 2 * 6e4)), "Ravi", "", "9000000001", "", "Dolly", "second workshop", "", "", "", "", "", ""]);
+  const r = await SS.runSync(); assert.equal(r.added, 0); assert.equal(await Lead.countDocuments({ phone10: "9000000001" }), 2);
+});
+await t("an old row for a person with several registrations is history — nothing is created or changed", async () => {
   rows.push([dmy(new Date(Date.now() - 3 * 864e5)), "Old Again", "", "9000000001", "", "Dolly", "", "", "", "", "", "", ""]);
-  const r = await SS.runSync(); assert.equal(r.again, 0);
+  const r = await SS.runSync(); assert.equal(r.added, 0); assert.equal(r.again, 0); assert.equal(await Lead.countDocuments({ phone10: "9000000001" }), 2);
+});
+await t("workshop days: Settings -> Workshops decides days and follow-ups per day; ratio dealing is exact", async () => {
+  const cfg = { ...(await S.getCfg()), workshops: S.cleanWorkshops([{ name: "One Day", days: 1, fu: 0 }, { name: "Three Day", days: 3, fu: 2 }]) };
+  assert.deepEqual([S.wsInfo(cfg, "one day").days, S.wsInfo(cfg, "one day").fu], [1, 1]);
+  assert.equal(S.wsInfo(cfg, "Three Day").days, 3); assert.equal(S.attFus(cfg, "One Day").length, 1); assert.equal(S.attFus(cfg, "Three Day").length, 2);
+  const out = S.dealByRatio(100, [{ name: "A", share: 2 }, { name: "B", share: 1 }, { name: "C", share: 1 }]);
+  assert.deepEqual([out.filter((x) => x === "A").length, out.filter((x) => x === "B").length, out.filter((x) => x === "C").length], [50, 25, 25]);
 });
 
 console.log("New bookings -> FU1");

@@ -8,7 +8,7 @@ import { Stats, Pill } from "../ui.jsx";
 import WorkshopBar from "../WorkshopBar.jsx";
 import TeamRace from "../TeamRace.jsx";
 import {
-  ATT_COLS, DELAY_BUCKETS, SETS, TODAY_BUCKETS, bucketOf, daysAgo, delay, endOfToday, fmt, fuCols, isDueToday, ownerOf, shortDate, stageWho, state, stepName, tasksOf, wa, waText,
+  DELAY_BUCKETS, SETS, TODAY_BUCKETS, attCols, bucketOf, dayCount, dayTag, daysAgo, delay, endOfToday, fmt, fuCols, isDueToday, ownerOf, shortDate, stageWho, state, stepName, tasksOf, wa, waText,
 } from "../leadUtils.js";
 
 // ---- tiny inline icons (no emoji, so they look the same on every phone) ----
@@ -21,7 +21,7 @@ const UserIco = () => <Ico size={13} d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v
 const OpenIco = () => <Ico size={12} d="M7 17 17 7M8 7h9v9" />;
 const TickIco = () => <Ico d="M22 11.08V12a10 10 0 1 1-5.93-9.14M22 4 12 14.01l-3-3" />;
 
-const stepLabel = (set, i) => (set === "d1Fus" ? "Day 1 · " : set === "d2Fus" ? "Day 2 · " : "") + (set === "fus" ? stepName(i) : stepName(i).toLowerCase());
+const stepLabel = (set, i) => dayTag(set) + (set === "fus" ? stepName(i) : stepName(i).toLowerCase());
 const BATCH = 10; // callers see a small, friendly batch at a time instead of a mountain
 const ADMIN_BATCH = 50;
 const clock = (d) => new Date(d).toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit", hour12: true }).toLowerCase();
@@ -100,6 +100,7 @@ export default function Tasks({ view = "today" }) {
   const { leads, loaded, cfg, now, who, admin, setModal, inWs, openLead, callers } = useLeads();
   const { user } = useAuth();
   const [lims, setLims] = useState({}); // how many cards each column shows
+  const [day, setDay] = useState(1); // attendee follow-ups: which Day tab
   const [q, setQ] = useState(""), [caller, setCaller] = useState("all"), [bucket, setBucket] = useState("all"), [sort, setSort] = useState("old");
   const delayed = view === "followups", attendees = view === "attendees", today = view === "today";
   const calm = !admin, eod = endOfToday().getTime(), sod = new Date().setHours(0, 0, 0, 0);
@@ -128,7 +129,10 @@ export default function Tasks({ view = "today" }) {
   const base = poolAll.filter(fits);
   const buckets = delayed ? DELAY_BUCKETS : today ? TODAY_BUCKETS : null;
   const bCount = (k) => base.filter((t) => bucketOf(t, now, delayed) === k).length;
-  let pool = buckets && bucket !== "all" ? base.filter((t) => bucketOf(t, now, delayed) === bucket) : base;
+  // Attendee follow-ups: one tab per workshop day (Day 3 only when a 3-day workshop exists), each with its own FU1 / FU2 columns
+  const nDays = dayCount(cfg, leads), dayNow = Math.min(day, nDays), daySet = "d" + dayNow + "Fus";
+  const scoped = attendees ? base.filter((t) => t.set === daySet) : base;
+  let pool = buckets && bucket !== "all" ? base.filter((t) => bucketOf(t, now, delayed) === bucket) : scoped;
   if (delayed && sort === "new") pool = [...pool].reverse();
   const cbShown = cbs.filter(fits);
   const filtered = !!needle || caller !== "all" || bucket !== "all";
@@ -139,7 +143,7 @@ export default function Tasks({ view = "today" }) {
   const first = (user?.name || "").split(" ")[0];
   const title = attendees ? "Attendee Follow-ups" : delayed ? "Delayed Follow-ups" : calm && first ? `${hello(now.getHours())}, ${first} 🌿` : "Today Follow-ups";
   const subtitle = attendees
-    ? "Calls to people who attended Day 1 or Day 2 — oldest first"
+    ? "Calls to people who attended each workshop day — pick the Day tab; one column per follow-up"
     : delayed
     ? calm ? "Conversations from earlier days that are still waiting — start with the oldest" : "Follow-ups from earlier days that are still pending, oldest first, one column per follow-up"
     : calm ? "A few lovely conversations are waiting for you. Take them one at a time, you've got this." : "Everything planned for today in time order, one column per follow-up";
@@ -154,7 +158,7 @@ export default function Tasks({ view = "today" }) {
     : [["Follow-ups today", base.length, base.length ? "accent" : ""], ["Due now", dueNow, dueNow ? "bad" : ""], ["Callbacks scheduled", cbs.length], ["Done today", doneToday, doneToday ? "good" : ""]];
 
   const emptyMsg = filtered ? "Nothing matches these filters" : attendees || delayed ? "None pending 🎉" : "Nothing planned";
-  const doneMsg = filtered ? "No follow-ups match these filters." : attendees ? "🎉 No attendee follow-ups pending." : delayed ? (calm ? "🎉 You're all caught up. Lovely work!" : "🎉 No delayed follow-ups.") : "No follow-ups planned for today yet.";
+  const doneMsg = filtered ? "No follow-ups match these filters." : attendees ? `🎉 No Day ${dayNow} follow-ups pending.` : delayed ? (calm ? "🎉 You're all caught up. Lovely work!" : "🎉 No delayed follow-ups.") : "No follow-ups planned for today yet.";
   const card = { calm, delayed, now, cfg, openLead, setModal };
   const more = (id, n) => setLims((p) => ({ ...p, [id]: n }));
   const colTasks = ([set, i]) => pool.filter((t) => t.set === set && t.i === i);
@@ -165,6 +169,15 @@ export default function Tasks({ view = "today" }) {
       {today && <TeamRace />}
       <Stats items={stats} />
       <WorkshopBar items={[...new Map(poolAll.map((t) => [t.l._id, t.l])).values()]} />
+      {attendees && (
+        <div className="range-pills" role="tablist" aria-label="Workshop day" style={{ margin: "12px 0 0" }}>
+          {Array.from({ length: nDays }, (_, i) => i + 1).map((d) => (
+            <button key={d} type="button" role="tab" aria-selected={dayNow === d} className={"range-pill" + (dayNow === d ? " range-pill-active" : "")} onClick={() => setDay(d)}>
+              Day {d} <span className="ld-chip-n">{base.filter((t) => t.set === "d" + d + "Fus").length}</span>
+            </button>
+          ))}
+        </div>
+      )}
 
       {!!poolAll.length && (
         <>
@@ -213,8 +226,10 @@ export default function Tasks({ view = "today" }) {
         </div>
       )}
       {!!pool.length && attendees && (
-        <div className="ld-cols ld-cols-2">
-          {ATT_COLS.map(([set, label]) => <TaskColumn key={set} id={set} label={label} sub="" items={pool.filter((t) => t.set === set)} lim={lims[set]} onMore={more} step={step} calm={calm} emptyMsg={emptyMsg} card={card} />)}
+        <div className="ld-cols">
+          {attCols(cfg, leads.filter(inWs), dayNow).map(([set, i, label, sub]) => (
+            <TaskColumn key={set + label} id={set + label} label={label} sub={`Day ${dayNow} · ${sub}`} items={colTasks([set, i])} tone={"fu" + ((i % 3) + 1)} lim={lims[set + label]} onMore={more} step={step} calm={calm} emptyMsg={emptyMsg} card={card} />
+          ))}
         </div>
       )}
     </div>

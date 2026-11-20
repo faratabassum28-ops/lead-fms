@@ -5,7 +5,7 @@ import { useToast } from "../components/Toast.jsx";
 import { usePolling } from "../hooks/usePolling.js";
 import { UpdateModal } from "./ui.jsx";
 import LeadDrawer from "./LeadDrawer.jsx";
-import { NO_WS } from "./leadUtils.js";
+import { NO_WS, regsOf } from "./leadUtils.js";
 
 const Ctx = createContext(null);
 export const useLeads = () => useContext(Ctx);
@@ -76,8 +76,14 @@ export function LeadsProvider({ children }) {
   const setWorkshop = (v) => { setWorkshopRaw(v); sessionStorage.setItem("ld-workshop", v); };
   const inWs = useCallback((l) => !ws || (ws === NO_WS ? !l.workshop : l.workshop === ws), [ws]);
   const openLead = (l) => setDrawer(l._id);
+  // every registration of the same person: regOf(l) -> { n: this is registration number n, of: how many in total, others: the other leads }
+  const regs = useMemo(() => regsOf(all), [all]);
+  const regOf = useCallback((l) => {
+    const list = regs.get(String(l.phone10 || l.phone || "").slice(-10)) || [l];
+    return { n: Math.max(1, list.findIndex((x) => x._id === l._id) + 1), of: list.length, others: list.filter((x) => x._id !== l._id) };
+  }, [regs]);
 
-  const value = { leads: all, loaded: leads !== null, lqLeads, cfg, callers: names, now, admin, who, busy, load, saveFollowUp, patchLead, sync, setModal, toast, tick, workshops, workshop: ws, setWorkshop, inWs, openLead };
+  const value = { leads: all, loaded: leads !== null, lqLeads, cfg, callers: names, now, admin, who, busy, load, saveFollowUp, patchLead, sync, setModal, toast, tick, workshops, workshop: ws, setWorkshop, inWs, openLead, regOf };
   const open = drawer && all.find((x) => x._id === drawer);
   return (
     <Ctx.Provider value={value}>

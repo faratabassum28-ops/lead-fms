@@ -419,3 +419,26 @@ body .shortcuts-wrap .shortcuts-panel { left: auto; right: 0; }
 .sh-head { background: transparent; font-size: 11.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); padding-bottom: 0; }
 .sh-n { font-variant-numeric: tabular-nums; font-weight: 700; }
 @media (max-width: 640px) { .sh-row { grid-template-columns: 1fr 50px; } .sh-head { display: none; } }
+
+/* ---- registrations, Day tabs, paste-and-share, workshops (added) ---- */
+.ld-reg { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 600; background: var(--accent-soft, rgba(44, 90, 160, 0.12)); color: var(--accent, #2c5aa0); white-space: nowrap; vertical-align: middle; }
+.ld-regs { margin: 10px 0 0; padding: 10px 12px; border: 1px dashed var(--line); border-radius: 10px; font-size: 13px; display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; }
+.range-pills .ld-chip-n { margin-left: 4px; }
+.ld-paste-head { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; margin-bottom: 6px; }
+.ld-paste-result { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+.ld-chips-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.ld-pillbtn { cursor: pointer; border: 0; font: inherit; }
+.ld-missing { word-break: break-word; margin: 6px 0 0; }
+.ld-deal { display: grid; gap: 6px; }
+.ld-deal-row { display: grid; grid-template-columns: minmax(130px, 1.2fr) auto minmax(60px, 1fr) minmax(90px, auto); gap: 10px; align-items: center; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; opacity: .7; }
+.ld-deal-row.on { opacity: 1; background: var(--panel-alt, var(--panel)); }
+.ld-deal-row > .ld-small:last-child { grid-column: 2 / -1; }
+.ld-stepper-n { display: inline-flex; gap: 4px; align-items: center; }
+.ld-stepper-n .ld-btn { padding: 2px 9px; min-width: 30px; }
+.ld-stepper-n .ld-share { width: 58px; text-align: center; }
+.ld-deal-bar { height: 8px; border-radius: 999px; background: var(--line); overflow: hidden; }
+.ld-deal-bar i { display: block; height: 100%; background: var(--accent, #2c5aa0); transition: width .2s; }
+.ld-deal-n { text-align: right; white-space: nowrap; }
+.ld-wstable td { vertical-align: middle; }
+.ld-wsdefault td { background: var(--panel-alt, transparent); }
+@media (max-width: 640px) { .ld-deal-row { grid-template-columns: 1fr auto; } .ld-deal-bar { grid-column: 1 / -1; } .ld-deal-n { text-align: left; } }

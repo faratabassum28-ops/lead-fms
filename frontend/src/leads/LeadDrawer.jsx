@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { api } from "../api.js";
-import { delay, fmt, hm, planLen, stepName, wa, waText } from "./leadUtils.js";
+import { useLeads } from "./LeadsContext.jsx";
+import { DAYS, dayTag, delay, fmt, hm, planLen, stepName, wa, waText, wsInfo } from "./leadUtils.js";
 
 const when = (d) => new Date(d).toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "numeric", minute: "2-digit", hour12: true }).replace(/\bam\b/, "am").replace(/\bpm\b/, "pm");
 const HOW = { auto: "automatic", sheet: "from the sheet", manual: "by an admin" };
@@ -8,10 +9,11 @@ const HOW = { auto: "automatic", sheet: "from the sheet", manual: "by an admin" 
 // Side drawer opened by clicking a lead's name: where the lead stands, who has it (and how it got to them),
 // and everything that ever happened — so a lead can be traced from the sheet to the last call.
 export default function LeadDrawer({ lead: l, cfg, admin, callers, now, workshops, onClose, onUpdate, onCall, onRefresh }) {
+  const { regOf, openLead } = useLeads(), reg = regOf(l);
   const [hist, setHist] = useState(null), [ws, setWs] = useState(l.workshop || ""), [sending, setSending] = useState(false), [waMsg, setWaMsg] = useState("");
   useEffect(() => { const k = (e) => e.key === "Escape" && onClose(); window.addEventListener("keydown", k); return () => window.removeEventListener("keydown", k); }, [onClose]);
   // reload the story whenever a call is saved on this lead
-  const sig = JSON.stringify([l.fus, l.d1Fus, l.d2Fus].map((a) => (a || []).map((f) => f.actual || "")));
+  const sig = JSON.stringify([l.fus, l.d1Fus, l.d2Fus, l.d3Fus].map((a) => (a || []).map((f) => f.actual || "")));
   useEffect(() => { let live = true; api.ldHistory(l._id).then((h) => live && setHist(h)).catch(() => live && setHist({ trail: [], calls: [] })); return () => { live = false; }; }, [l._id, sig, l.assignedTo, l.workshop]);
   useEffect(() => setWs(l.workshop || ""), [l.workshop]);
 
@@ -19,14 +21,15 @@ export default function LeadDrawer({ lead: l, cfg, admin, callers, now, workshop
   const cur = fus.findIndex((f) => !f.actual && !f.skipped);
   const stepState = (f, i) => (f.skipped ? "skip" : f.actual ? "done" : i === cur ? "cur" : "wait");
   const steps = [...fus.map((f, i) => ({ label: "FU" + (i + 1), s: stepState(f, i), tip: f.status || (f.skipped ? "Auto-closed" : f.planned ? "Planned " + fmt(f.planned) : "") })),
-    { label: "Day 1", s: l.day1 ? "done" : "wait", tip: l.day1 ? "Attended" : "Not marked" }, { label: "Day 2", s: l.day2 ? "done" : "wait", tip: l.day2 ? "Attended" : "Not marked" }];
+    // one step per day this workshop runs (Settings → Workshops): 1, 2 or 3
+    ...DAYS.filter((n) => n <= wsInfo(cfg, l.workshop).days || l["day" + n]).map((n) => ({ label: "Day " + n, s: l["day" + n] ? "done" : "wait", tip: l["day" + n] ? "Attended" : "Not marked" }))];
   // the next call to make: the first open step of the lead's own calls, else of the Day 1 / Day 2 calls
   const next = (() => {
     if (cur >= 0) return { set: "fus", i: cur, f: fus[cur] };
-    for (const set of ["d1Fus", "d2Fus"]) { const a = (l[set] || []).slice(0, planLen(cfg, set)), i = a.findIndex((f) => !f.actual && !f.skipped); if (i >= 0) return { set, i, f: a[i] }; }
+    for (const set of ["d1Fus", "d2Fus", "d3Fus"]) { const a = (l[set] || []).slice(0, planLen(cfg, set)), i = a.findIndex((f) => !f.actual && !f.skipped); if (i >= 0) return { set, i, f: a[i] }; }
     return null;
   })();
-  const stage = next ? `${next.set === "d1Fus" ? "Day 1 · " : next.set === "d2Fus" ? "Day 2 · " : ""}${stepName(next.i)}` : "All calls done";
+  const stage = next ? `${dayTag(next.set)}${stepName(next.i)}` : "All calls done";
   const state = next ? (new Date(next.f.planned) < now ? "over" : "wait") : "done";
 
   // one timeline: the lead's own trail + every call ever logged
@@ -65,10 +68,16 @@ export default function LeadDrawer({ lead: l, cfg, admin, callers, now, workshop
             <div key={i} className={"ld-step ld-step-" + s.s} title={s.tip}><i /><span>{s.label}</span></div>
           ))}
         </div>
+        {reg.of > 1 && (
+          <div className="ld-regs">
+            <b>Registration #{reg.n} of {reg.of}</b> — this person registered again. Other registrations:
+            {reg.others.map((o) => <button key={o._id} type="button" className="ld-chip" onClick={() => openLead(o)}>{o.workshop || "No workshop"} · {fmt(o.ts)}</button>)}
+          </div>
+        )}
         <p className="ld-small ld-dr-meta">Came in {l.ts ? when(l.ts) : "—"}{l.source === "manual" ? " · added manually" : " · Google Sheet"}</p>
         <div className="ld-assigned">
           <span className="ld-who-tag"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z" /></svg>Assigned to <b>{owner}</b>{l.assignedBy && HOW[l.assignedBy] ? <em> ({HOW[l.assignedBy]})</em> : null}</span>
-          {(l.d1Assigned || l.d2Assigned) && <span className="ld-small">{l.d1Assigned && `Day 1 calls: ${l.d1Assigned}`}{l.d1Assigned && l.d2Assigned ? " · " : ""}{l.d2Assigned && `Day 2 calls: ${l.d2Assigned}`}</span>}
+          {DAYS.some((n) => l["d" + n + "Assigned"]) && <span className="ld-small">{DAYS.filter((n) => l["d" + n + "Assigned"]).map((n) => `Day ${n} calls: ${l["d" + n + "Assigned"]}`).join(" · ")}</span>}
           {admin && (
             <select className="ld-select" value={l.assignedTo || ""} onChange={(e) => onUpdate({ assignedTo: e.target.value })} aria-label="Assign to">
               <option value="">Unassigned</option>{callers.map((c) => <option key={c}>{c}</option>)}

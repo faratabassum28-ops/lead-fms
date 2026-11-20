@@ -9,7 +9,7 @@ import WorkshopBar from "../WorkshopBar.jsx";
 
 // The sheet view: Lead Qualification + Follow-Up 1/2/3, exactly like the old Google Sheet.
 export default function LeadList() {
-  const { lqLeads: leads, loaded, cfg, callers, now, admin, setModal, load, toast, inWs, openLead, workshops } = useLeads();
+  const { lqLeads: leads, loaded, cfg, callers, now, admin, setModal, load, toast, inWs, openLead, workshops, regOf } = useLeads();
   const [q, setQ] = useState(""), [flt, setFlt] = useState("all"), [doer, setDoer] = useState("all");
   const [sel, setSel] = useState({}), [to, setTo] = useState(""), [add, setAdd] = useState(null), [lim, setLim] = useState(200);
 
@@ -58,7 +58,7 @@ export default function LeadList() {
             <tr><th colSpan={admin ? 15 : 12} className="g0">Lead Qualification</th>{steps.map((n) => <th key={n} colSpan={5} className={gc(n)}>Follow-Up {n}{cfg?.plan?.[n - 1] ? ` · planned ${cfg.plan[n - 1].time}` : ""}</th>)}</tr>
             <tr>
               {admin && <th><input type="checkbox" aria-label="Select all shown" onChange={(e) => setSel(e.target.checked ? Object.fromEntries(rows.slice(0, lim).map((l) => [l._id, 1])) : {})} /></th>}
-              {["Timestamp", "Lead Name", ...(admin ? ["Phone", "Email"] : []), "Assigned To", "Workshop", "Current Status", "Level", "Profession", "City", "UTW Date", "Webinar Reg.", "Paid", "Day 1/2"].map((h) => <th key={h}>{h}</th>)}
+              {["Timestamp", "Lead Name", ...(admin ? ["Phone", "Email"] : []), "Assigned To", "Workshop", "Current Status", "Level", "Profession", "City", "UTW Date", "Webinar Reg.", "Paid", "Days attended"].map((h) => <th key={h}>{h}</th>)}
               {steps.flatMap((n) => ["Planned", "Actual", "Status", "Action", "Delay"].map((h) => <th key={n + h} className={gc(n)}>{h}</th>))}
             </tr>
           </thead>
@@ -68,12 +68,12 @@ export default function LeadList() {
               return (
                 <tr key={l._id}>
                   {admin && <td><input type="checkbox" checked={!!sel[l._id]} onChange={(e) => setSel({ ...sel, [l._id]: e.target.checked })} aria-label={"Select " + l.name} /></td>}
-                  <td>{fmt(l.ts)}</td><td><button type="button" className="ld-namebtn" onClick={() => openLead(l)} title="See this lead's history"><b>{l.name}</b></button></td>{admin && <><td>{l.phone}</td><td>{l.email}</td></>}
+                  <td>{fmt(l.ts)}</td><td><button type="button" className="ld-namebtn" onClick={() => openLead(l)} title="See this lead's history"><b>{l.name}</b></button>{regOf(l).of > 1 && <span className="ld-reg" title="This person registered more than once — each registration is its own row">#{regOf(l).n} of {regOf(l).of}</span>}</td>{admin && <><td>{l.phone}</td><td>{l.email}</td></>}
                   <td>{l.assignedTo || <span className="ld-pill ld-pill-over">Unassigned</span>}</td>
                   <td>{l.workshop ? <span className="ld-ws">{l.workshop}</span> : "—"}</td>
                   <td>{cur}</td><td>{l.level}</td><td>{l.profession}</td><td>{l.city}</td><td>{l.utwDate}</td><td>{l.webReg}</td>
                   <td>{l.paid ? <span className="ld-pill ld-pill-done" title={l.payMethod || "Razorpay"}>₹{Number(l.paidAmount || 0).toLocaleString("en-IN")}</span> : "—"}</td>
-                  <td>{l.day1 ? "✅" : "▫️"}{l.day2 ? "✅" : "▫️"}</td>
+                  <td>{l.day1 ? "✅" : "▫️"}{l.day2 ? "✅" : "▫️"}{l.day3 ? "✅" : ""}</td>
                   {steps.map((n) => {
                     const i = n - 1, f = l.fus[i];
                     if (!f) return <React.Fragment key={i}><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></React.Fragment>;
