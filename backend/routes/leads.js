@@ -32,7 +32,7 @@ router.get("/config", wrap(async (req, res) => {
   const c = await S.getCfg();
   res.json(req.lu.leadAdmin
     ? { ...c, aisensy: W.aiCfg(c), lastSync: await S.lastSync(), bookingStatus: await bookingStatus(), integrations: { aisensyKey: W.keyIsSet(), aisensyProblems: W.problems(c), razorpaySignature: !!process.env.RAZORPAY_WEBHOOK_SECRET, razorpayUrlSecret: !!process.env.INTAKE_SECRET } }
-    : { statuses: c.statuses, plan: c.plan, attPlan: c.attPlan, waTemplate: c.waTemplate });
+    : { statuses: c.statuses, plan: c.plan, attPlan: c.attPlan, workshops: c.workshops, wsDefault: c.wsDefault, waTemplate: c.waTemplate });
 }));
 router.put("/config", adminOnly, wrap(async (req, res) => {
   const b = req.body || {}, applyToExisting = b.applyToExisting !== false;
@@ -41,6 +41,9 @@ router.put("/config", adminOnly, wrap(async (req, res) => {
   next.plan = S.cleanPlan(next.plan, "Lead follow-ups");
   next.attPlan = S.cleanPlan(next.attPlan, "Attendee follow-ups");
   next.assign = S.cleanAssign(next.assign);
+  next.workshops = S.cleanWorkshops(next.workshops, next.attPlan.length);
+  next.wsDefault = S.cleanWsDefault(next.wsDefault);
+  next.wsDefault.fu = Math.min(next.wsDefault.fu, next.attPlan.length);
   delete next.autoAssign; // replaced by "Automatic assignment"
   next.aisensy = W.cleanAisensy({ ...W.aiCfg(prev), ...(b.aisensy || {}) });
   next.sheetUrl = String(next.sheetUrl || "").trim();
@@ -54,7 +57,8 @@ router.put("/config", adminOnly, wrap(async (req, res) => {
   if (!Array.isArray(next.statuses) || !next.statuses.length) throw fail("Add at least one call status");
   await S.setCfg(next);
   // a follow-up was ADDED or REMOVED -> every existing lead follows the new plan (and so to Today / Delayed / Attendee Follow-ups)
-  const changed = next.plan.length !== prev.plan.length || next.attPlan.length !== prev.attPlan.length;
+  const wsKey = (c) => JSON.stringify([c.workshops || [], c.wsDefault || {}]);
+  const changed = next.plan.length !== prev.plan.length || next.attPlan.length !== prev.attPlan.length || wsKey(next) !== wsKey(prev); // also when a workshop's days / follow-ups changed
   const added = changed && applyToExisting ? await S.addStepsToExistingLeads(await S.getCfg()) : null;
   res.json({ ...(await S.getCfg()), ...(added ? { addedToLeads: added.leads, addedSteps: added.steps, removedSteps: added.removed } : {}) });
 }));
@@ -123,10 +127,13 @@ router.get("/leads/:id/history", wrap(async (req, res) => {
 router.post("/leads", adminOnly, wrap(async (req, res) => {
   const c = await S.getCfg(), b = req.body || {}, phone = String(b.phone || "").replace(/\D/g, "");
   if (!phone || !b.name?.trim()) throw fail("Name and phone are required");
-  const ts = new Date(), A = await S.assigner("new", c), owner = b.assignedTo || A.pick();
+  const ts = new Date(), A = await S.assigner("new", c), owner = b.assignedTo || A.pick((await S.byPhoneAll(phone.slice(-10)))[0]?.assignedTo);
   const story = [{ at: ts, type: "entered", text: "Lead added by " + req.user.name, by: req.user.name }];
   if (owner) story.push({ at: ts, type: "assign", text: `Assigned to ${owner} (${b.assignedTo ? "by " + req.user.name : "automatic"})`, by: b.assignedTo ? req.user.name : "System" });
-  const lead = await Lead.create({ key: phone, phone, name: b.name.trim(), email: b.email, city: b.city, profession: b.profession, level: b.level, workshop: S.cleanWorkshop(b.workshop), ts, assignedTo: owner, assignedBy: owner ? (b.assignedTo ? "manual" : "auto") : undefined, assignedAt: owner ? ts : undefined, locked: !!b.assignedTo, source: "manual", fus: S.planNew(ts, c), trail: story });
+  // the same person can register again (same or another workshop): every registration is its own lead
+  const before = await S.byPhoneAll(phone.slice(-10)), key = before.length ? `${phone}#${+ts}` : phone;
+  if (before.length) story[0].text = `Registered again (registration #${before.length + 1}) — added by ${req.user.name}`;
+  const lead = await Lead.create({ key, phone, name: b.name.trim(), email: b.email, city: b.city, profession: b.profession, level: b.level, workshop: S.cleanWorkshop(b.workshop), ts, assignedTo: owner, assignedBy: owner ? (b.assignedTo ? "manual" : "auto") : undefined, assignedAt: owner ? ts : undefined, locked: !!b.assignedTo, source: "manual", fus: S.planNew(ts, c), trail: story });
   await A.save();
   res.json(S.plain(lead));
 }));
@@ -144,10 +151,11 @@ router.patch("/leads/:id", wrap(async (req, res) => {
   const l = await loadLead(req.params.id);
   if (!S.ownsLead(req.lu, l)) throw fail("Not your lead", 403);
   const b = req.body || {}, cfg = await S.getCfg();
-  for (const d of [1, 2]) if ("day" + d in b) {
-    const was = !!l["day" + d];
+  for (const d of S.DAYS) if ("day" + d in b) {
+    const was = !!l["day" + d], info = S.wsInfo(cfg, l.workshop);
+    if (b["day" + d] && d > info.days) throw fail(`${l.workshop || "This lead's workshop"} runs ${info.days} day${info.days > 1 ? "s" : ""} — Day ${d} doesn't exist for it. Change the days in Settings → Workshops.`);
     l["day" + d] = !!b["day" + d];
-    if (b["day" + d] && !l["d" + d + "Fus"].length) l["d" + d + "Fus"] = S.attFus(cfg);
+    if (b["day" + d] && !l["d" + d + "Fus"].length) l["d" + d + "Fus"] = S.attFus(cfg, l.workshop);
     if (b["day" + d] && !was) { S.trail(l, "attendance", `Marked present on Day ${d}`, req.user.name); S.autoAssignDay(l, d, await S.assigner("d" + d, cfg)); }
     if (!b["day" + d] && was) S.trail(l, "attendance", `Day ${d} attendance removed`, req.user.name);
   }
@@ -169,7 +177,7 @@ router.patch("/leads/:id", wrap(async (req, res) => {
 router.patch("/leads/:id/fu/:n", wrap(async (req, res) => {
   const l = await loadLead(req.params.id);
   if (!S.ownsLead(req.lu, l)) throw fail("Not your lead", 403);
-  const b = req.body || {}, set = ["d1Fus", "d2Fus"].includes(b.set) ? b.set : "fus", arr = l[set], n = +req.params.n, f = arr[n - 1];
+  const b = req.body || {}, set = S.ATTSETS.includes(b.set) ? b.set : "fus", arr = l[set], n = +req.params.n, f = arr[n - 1];
   if (!f) throw fail("No such follow-up");
   const cfg = await S.getCfg();
   if (b.status && !cfg.statuses.includes(b.status)) throw fail("Unknown status");
@@ -206,28 +214,57 @@ router.patch("/leads/:id/fu/:n", wrap(async (req, res) => {
   if (sendWelcome) W.welcomeSoon(l._id, { callerName: req.lu.leadAdmin ? l.assignedTo || S.leadCallerName(req.user) : S.leadCallerName(req.user), by: req.user.name });
 }));
 
-// paste phone numbers and/or emails -> mark Day 1 / Day 2 attendees (+ their follow-ups)
+// Paste phone numbers and/or emails -> mark Day 1 / 2 / 3 attendees (+ their follow-ups).
+//   workshop   which workshop the pasted people attended ("" = any: their newest registration is used). A person who registered
+//              for several workshops is marked on the registration of THIS workshop.
+//   dryRun     only count what would happen (matched / already marked / not found) — the "check" step before assigning
+//   assign     { people: [{ name, share }] }: deal the matched attendees' follow-up calls to these people by the ratio
+//              (without it, Settings -> Automatic assignment decides)
 router.post("/attendance", adminOnly, wrap(async (req, res) => {
-  const d = +req.body?.day === 2 ? 2 : 1, cfg = await S.getCfg(), missing = [];
-  const entries = [...(req.body?.entries || []), ...(req.body?.phones || [])].map((x) => String(x).trim()).filter(Boolean);
-  let marked = 0;
-  const seen = new Set(), A = await S.assigner("d" + d, cfg);
+  const b = req.body || {}, d = S.DAYS.includes(+b.day) ? +b.day : 1, cfg = await S.getCfg();
+  const want = S.cleanWorkshop(b.workshop).toLowerCase(), set = "d" + d + "Fus";
+  const entries = [...new Set([...(b.entries || []), ...(b.phones || [])].map((x) => String(x).trim()).filter(Boolean))];
+  const picked = [], missing = [], notInDays = [], seen = new Set();
+  let other = 0, already = 0;
   for (const e of entries) {
     const n = e.replace(/\D/g, "").slice(-10);
     // an email is matched on the email; anything else on the phone number
-    const l = S.isEmail(e) ? await S.byEmail(e) : n.length >= 10 ? await S.byPhone(n) : null;
-    if (!l) { missing.push(e); continue; }
+    const regs = S.isEmail(e) ? await S.byEmailAll(e) : n.length >= 10 ? await S.byPhoneAll(n) : [];
+    if (!regs.length) { missing.push(e); continue; }
+    let l = want ? regs.find((x) => (x.workshop || "").toLowerCase() === want) : null;
+    const fallback = !!want && !l;
+    l = l || regs[0];
     if (seen.has(String(l._id))) continue; // the same person pasted by phone and by email
     seen.add(String(l._id));
+    const info = S.wsInfo(cfg, l.workshop);
+    if (d > info.days) { notInDays.push(`${l.name} (${l.workshop || "no workshop"} runs ${info.days} day${info.days > 1 ? "s" : ""})`); continue; }
+    if (fallback) other++;
+    if (l["day" + d]) already++;
+    picked.push(l);
+  }
+  const summary = { total: picked.length, already, newly: picked.length - already, other, missing, notInDays };
+  if (b.dryRun) return res.json({ dryRun: true, ...summary });
+
+  const people = b.assign ? S.cleanDealPeople(b.assign.people) : [];
+  if (b.assign && !people.length) throw fail("Tick at least one person to share the calls with — or choose “keep with each lead's own caller”");
+  // calls nobody has made yet can be re-dealt; a lead whose Day calls were already started stays with that caller
+  const dealable = people.length ? picked.filter((l) => !(l[set] || []).some((f) => f.actual)) : [];
+  const deal = S.dealByRatio(dealable.length, people), dealt = new Map(dealable.map((l, i) => [String(l._id), deal[i]])), given = {};
+  const A = await S.assigner("d" + d, cfg);
+  for (const l of picked) {
     if (!l["day" + d]) S.trail(l, "attendance", `Marked present on Day ${d}`, req.user.name);
     l["day" + d] = true;
-    if (!l["d" + d + "Fus"].length) l["d" + d + "Fus"] = S.attFus(cfg);
-    S.autoAssignDay(l, d, A);
+    if (!l[set].length) l[set] = S.attFus(cfg, l.workshop);
+    const to = dealt.get(String(l._id));
+    if (to) {
+      if (to.toLowerCase() !== (l[`d${d}Assigned`] || "").toLowerCase()) S.trail(l, "assign", `Day ${d} calls assigned to ${to} (shared by ratio when attendance was pasted)`, req.user.name);
+      l[`d${d}Assigned`] = to; l[`d${d}By`] = "paste"; given[to] = (given[to] || 0) + 1;
+    } else if (!people.length) S.autoAssignDay(l, d, A);
     await l.save();
-    marked++;
   }
   await A.save();
-  res.json({ marked, missing });
+  S.bustProgress();
+  res.json({ ...summary, marked: picked.length, assigned: given });
 }));
 
 // ---------- history ----------
@@ -273,7 +310,7 @@ router.get("/team", adminOnly, wrap(async (_req, res) => {
 // caller names that leads are assigned to but that nobody can sign in as yet
 router.get("/team/missing", adminOnly, wrap(async (_req, res) => {
   const have = new Set((await User.find({ active: { $ne: false } }).lean()).map((u) => S.leadCallerName(u).toLowerCase()));
-  const rows = await Lead.aggregate([{ $project: { n: ["$assignedTo", "$d1Assigned", "$d2Assigned"] } }, { $unwind: "$n" }, { $match: { n: { $nin: [null, ""] } } }, { $group: { _id: "$n", leads: { $sum: 1 } } }]);
+  const rows = await Lead.aggregate([{ $project: { n: ["$assignedTo", "$d1Assigned", "$d2Assigned", "$d3Assigned"] } }, { $unwind: "$n" }, { $match: { n: { $nin: [null, ""] } } }, { $group: { _id: "$n", leads: { $sum: 1 } } }]);
   const by = new Map();
   for (const r of rows) { const k = String(r._id).trim().toLowerCase(); if (!k || have.has(k)) continue; const x = by.get(k) || { name: String(r._id).trim(), leads: 0 }; x.leads += r.leads; by.set(k, x); }
   res.json([...by.values()].sort((a, b) => b.leads - a.leads));

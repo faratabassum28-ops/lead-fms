@@ -192,3 +192,15 @@ and `setupBookingSync`, deploy as a Web app and paste its URL in Settings. The w
 row is added): every booking made **after the link was saved** becomes a **Paid** lead in **FU1, due now** (assigned by *Automatic assignment*);
 someone who is already a lead is marked Paid and pulled to FU1 — never duplicated. Each row is applied once, old orders are ignored, and the
 amount never double-counts a Razorpay payment. `npm run test:flow` covers it.
+
+
+## Re-registrations, workshop days and sharing attendance (new)
+
+- **Registering again.** The same person can register again and again — for the same or another workshop. Every registration is its own lead
+  (its own FU1…, attendance and follow-ups) and is tagged **#2 of 3** on Leads / Attendance / the lead drawer. A second sheet row within
+  10 minutes for the same workshop is treated as a double click, not a new registration. Payments and bookings go to the registration of the same workshop.
+- **Settings → Workshops.** Set each workshop to **1, 2 or 3 days** and how many follow-ups follow each day (Automatic = 1 for a 1-day workshop, the full attendee plan otherwise).
+  Day 3 tabs/columns appear only when a 3-day workshop exists.
+- **Attendance → paste.** Paste phone numbers/emails → **Check** (found / already marked / not found / workshop) → tick the team members and set the
+  **ratio** (2 : 1 : 1 …). The page shows exactly how many each person gets before anything is saved.
+- **Attendee Follow-ups** has a tab per day (Day 1 / Day 2 / Day 3), each with its own FU1 / FU2 columns.

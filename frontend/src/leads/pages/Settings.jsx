@@ -3,7 +3,7 @@ import PageHeader from "../../components/PageHeader.jsx";
 import PageLoader from "../../components/PageLoader.jsx";
 import { api, API_BASE } from "../../api.js";
 import { useLeads } from "../LeadsContext.jsx";
-import { fmt } from "../leadUtils.js";
+import { dayCount, fmt, wsInfo } from "../leadUtils.js";
 import { Panel } from "../ui.jsx";
 
 const MAX_FU = 10;
@@ -13,12 +13,12 @@ const Field = ({ label, hint, children }) => <label className="ld-field"><span c
 
 // Intake sheet, follow-up schedule, statuses and automations.
 export default function Settings() {
-  const { cfg, load, sync, toast, leads } = useLeads();
+  const { cfg, load, sync, toast, leads, workshops } = useLeads();
   if (!cfg) return <PageLoader />;
-  return <Form key={JSON.stringify(cfg.plan) + JSON.stringify(cfg.attPlan) + JSON.stringify(cfg.assign) + cfg.intakeSheet + cfg.sheetUrl + cfg.sheetToken + cfg.bookingUrl + cfg.bookingFrom} cfg={cfg} load={load} sync={sync} toast={toast} leads={leads} />;
+  return <Form key={JSON.stringify(cfg.plan) + JSON.stringify(cfg.attPlan) + JSON.stringify(cfg.assign) + JSON.stringify(cfg.workshops) + JSON.stringify(cfg.wsDefault) + cfg.intakeSheet + cfg.sheetUrl + cfg.sheetToken + cfg.bookingUrl + cfg.bookingFrom} cfg={cfg} load={load} sync={sync} toast={toast} leads={leads} workshops={workshops} />;
 }
 
-function Form({ cfg, load, sync, toast, leads }) {
+function Form({ cfg, load, sync, toast, leads, workshops }) {
   const [c, setC] = useState(cfg), [st, setSt] = useState(cfg.statuses.join(", ")), [rs, setRs] = useState(cfg.retryStatuses.join(", ")), [cs, setCs] = useState(cfg.closeStatuses.join(", "));
   const [saving, setSaving] = useState(false);
   const [log, setLog] = useState(null), [clearing, setClearing] = useState(false);
@@ -38,7 +38,7 @@ function Form({ cfg, load, sync, toast, leads }) {
   const edit = (key, i, k, v) => setC({ ...c, [key]: c[key].map((p, j) => (j === i ? { ...p, [k]: v } : p)) });
   const addStep = (key) => setC({ ...c, [key]: [...c[key], { days: (+c[key][c[key].length - 1]?.days || 0) + 1, time: c[key][c[key].length - 1]?.time || "11:00" }] });
   const dropStep = (key) => setC({ ...c, [key]: c[key].slice(0, -1) });
-  const grew = c.plan.length !== cfg.plan.length || c.attPlan.length !== cfg.attPlan.length;
+  const grew = c.plan.length !== cfg.plan.length || c.attPlan.length !== cfg.attPlan.length || JSON.stringify([c.workshops, c.wsDefault]) !== JSON.stringify([cfg.workshops, cfg.wsDefault]);
   const full = () => ({ ...c, statuses: csv(st), retryStatuses: csv(rs), closeStatuses: csv(cs), applyToExisting: toAll });
   const save = async (after) => {
     setSaving(true);
@@ -134,10 +134,12 @@ function Form({ cfg, load, sync, toast, leads }) {
         catch (e) { toast(e.message, "bad"); }
       })} />
 
+      <WorkshopsPanel c={c} setC={setC} workshops={workshops} />
+
       <Panel title="Follow-up schedule">
         <p className="ld-small" style={{ marginTop: 0 }}>Days after the lead arrives, and the time of day (India time). Add up to {MAX_FU} follow-ups — each one shows up on Today / Delayed Follow-ups as soon as it is due.</p>
         <PlanRows rows={c.plan} label="FU" onEdit={(i, k, v) => edit("plan", i, k, v)} onAdd={() => addStep("plan")} onDrop={() => dropStep("plan")} />
-        <div className="ld-subhead">Attendee follow-ups <span className="ld-small">(days after someone is marked present on Day 1 / Day 2)</span></div>
+        <div className="ld-subhead">Attendee follow-ups <span className="ld-small">(days after someone is marked present on a workshop day — the same plan for Day 1, 2 and 3; a workshop can use fewer, see Workshops above)</span></div>
         <PlanRows rows={c.attPlan} label="AFU" onEdit={(i, k, v) => edit("attPlan", i, k, v)} onAdd={() => addStep("attPlan")} onDrop={() => dropStep("attPlan")} />
         {grew && <Check checked={toAll} onChange={setToAll}><span>Also add the new follow-up to <b>all existing leads</b> (steps already in the past are scheduled for the next working slot; auto-closed leads stay closed)</span></Check>}
         <div className="ld-row" style={{ marginTop: 10 }}>Working hours
@@ -195,6 +197,73 @@ function Form({ cfg, load, sync, toast, leads }) {
 }
 
 // one editable list of follow-up steps with "+ Add follow-up" (max 10) and "Remove last"
+// ---------------------------------------------------------------------------
+// Workshops: how many days each one runs (1 / 2 / 3) and how many follow-up calls follow each day.
+// A workshop is listed here the moment its name shows up in the sheet. Not listed = the default row.
+// ---------------------------------------------------------------------------
+function WorkshopsPanel({ c, setC, workshops }) {
+  const [add, setAdd] = useState("");
+  const saved = c.workshops || [], max = c.attPlan.length, def = { days: 2, fu: 0, ...(c.wsDefault || {}) };
+  const names = [...new Map([...workshops.map((w) => [w.name.toLowerCase(), { name: w.name, count: w.count }]), ...saved.map((w) => [w.name.toLowerCase(), { name: w.name, count: workshops.find((x) => x.name.toLowerCase() === w.name.toLowerCase())?.count || 0 }])]).values()];
+  const put = (name, patch) => {
+    const cur = wsInfo(c, name), have = saved.find((w) => w.name.toLowerCase() === name.toLowerCase());
+    const next = { name, days: have?.days ?? cur.days, fu: have?.fu ?? 0, ...patch };
+    // moving to a 1-day workshop: one follow-up is enough (the field is still editable afterwards)
+    if (patch.days === 1 && patch.fu === undefined) next.fu = 0;
+    setC({ ...c, workshops: [...saved.filter((w) => w.name.toLowerCase() !== name.toLowerCase()), next] });
+  };
+  const reset = (name) => setC({ ...c, workshops: saved.filter((w) => w.name.toLowerCase() !== name.toLowerCase()) });
+  const addNew = () => {
+    const name = add.replace(/\s+/g, " ").trim().slice(0, 80);
+    if (!name) return;
+    put(name, { days: def.days }); setAdd("");
+  };
+  const fuOptions = (days) => [0, ...Array.from({ length: max }, (_, i) => i + 1)].map((n) => <option key={n} value={n}>{n === 0 ? `Automatic (${days === 1 ? 1 : max})` : `${n} follow-up${n > 1 ? "s" : ""}`}</option>);
+  const dayBtns = (val, onPick, label) => (
+    <div className="ld-seg" role="group" aria-label={label}>
+      {[1, 2, 3].map((n) => <button key={n} type="button" className={val === n ? "on" : ""} onClick={() => onPick(n)}>{n} day{n > 1 ? "s" : ""}</button>)}
+    </div>
+  );
+  return (
+    <Panel title="🎓 Workshops — days & follow-ups">
+      <p className="ld-small" style={{ marginTop: 0 }}>
+        Tell the site how long each workshop runs. A <b>3-day</b> workshop gets Day 1, Day 2 and Day 3 attendance and follow-ups; a <b>1-day</b> workshop only Day 1.
+        <b> Follow-ups after each day</b> is how many calls an attendee gets — for a 1-day workshop FU1 is usually enough. “Automatic” means 1 for a 1-day workshop and the full attendee plan ({max}) for the others.
+        Workshops appear here by themselves when their name is typed in the sheet. Press <b>Save settings</b> to apply — existing attendees' pending calls are adjusted too.
+      </p>
+      <div className="table-wrap">
+        <table className="table ld-wstable">
+          <thead><tr><th>Workshop</th><th>Leads</th><th>Runs for</th><th>Follow-ups after each day</th><th /></tr></thead>
+          <tbody>
+            {names.map((w) => {
+              const info = wsInfo(c, w.name), have = saved.find((x) => x.name.toLowerCase() === w.name.toLowerCase());
+              return (
+                <tr key={w.name}>
+                  <td><b>{w.name}</b>{!info.listed && <span className="ld-small"> · default</span>}</td>
+                  <td>{w.count}</td>
+                  <td>{dayBtns(info.days, (n) => put(w.name, { days: n }), w.name + " days")}</td>
+                  <td><select className="ld-input" value={have?.fu || 0} onChange={(e) => put(w.name, { fu: +e.target.value })} aria-label={w.name + " follow-ups"}>{fuOptions(info.days)}</select></td>
+                  <td>{have && <button type="button" className="link-btn" onClick={() => reset(w.name)}>Use default</button>}</td>
+                </tr>
+              );
+            })}
+            {!names.length && <tr><td colSpan={5} className="empty-state">No workshops yet — they appear here once leads arrive with a Workshop Name, or add one below.</td></tr>}
+            <tr className="ld-wsdefault">
+              <td><b>Any other workshop</b><div className="ld-small">the default</div></td><td />
+              <td>{dayBtns(def.days, (n) => setC({ ...c, wsDefault: { ...def, days: n } }), "Default days")}</td>
+              <td><select className="ld-input" value={def.fu || 0} onChange={(e) => setC({ ...c, wsDefault: { ...def, fu: +e.target.value } })} aria-label="Default follow-ups">{fuOptions(def.days)}</select></td><td />
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div className="ld-row" style={{ marginTop: 10 }}>
+        <input className="ld-input" style={{ maxWidth: 280 }} value={add} onChange={(e) => setAdd(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addNew()} placeholder="Add a workshop before its first lead…" aria-label="New workshop name" />
+        <button type="button" className="ld-btn ld-btn-add" disabled={!add.trim()} onClick={addNew}>＋ Add workshop</button>
+      </div>
+    </Panel>
+  );
+}
+
 function PlanRows({ rows, label, onEdit, onAdd, onDrop }) {
   return (
     <>
@@ -222,11 +291,13 @@ const QUEUES = [
   ["new", "New leads", "Leads that arrive from the sheet with a blank “Assigned To”"],
   ["d1", "Day 1 attendees", "The calls after someone is marked present on Day 1"],
   ["d2", "Day 2 attendees", "The calls after someone is marked present on Day 2"],
+  ["d3", "Day 3 attendees", "The calls after someone is marked present on Day 3 (3-day workshops)"],
 ];
 const HINT = {
   new: { off: "Nothing is shared automatically. New leads keep the sheet's Assigned To, or stay unassigned.", manual: "New leads without an Assigned To wait for an admin to assign them (Leads → select → Assign).", auto: "New leads without an Assigned To are shared out by the ratio below, among the people who are present." },
   d1: { off: "Day 1 calls stay with the caller who owns the lead.", manual: "Day 1 calls stay with the lead's caller until an admin changes them.", auto: "Day 1 calls are shared out by the ratio below (the lead's own caller keeps them when “keep with the same person” is on)." },
   d2: { off: "Day 2 calls stay with the caller who owns the lead.", manual: "Day 2 calls stay with the lead's caller until an admin changes them.", auto: "Day 2 calls are shared out by the ratio below (the lead's own caller keeps them when “keep with the same person” is on)." },
+  d3: { off: "Day 3 calls stay with the caller who owns the lead.", manual: "Day 3 calls stay with the lead's caller until an admin changes them.", auto: "Day 3 calls are shared out by the ratio below (the lead's own caller keeps them when “keep with the same person” is on)." },
 };
 function AssignPanel({ c, setC, leads, saving, onReshare }) {
   const [team, setTeam] = useState(null);
@@ -252,7 +323,7 @@ function AssignPanel({ c, setC, leads, saving, onReshare }) {
     <Panel title="👥 Automatic assignment">
       <p className="ld-small" style={{ marginTop: 0 }}>Decide how work is handed out. <b>Share</b> is a weight (2 = twice as many as 1), and un-ticking <b>Present</b> stops new work for that person today — for example when they are on leave. Leads an admin assigned by hand are never moved.</p>
       <Check checked={A.keepSame} onChange={(v) => setC({ ...c, assign: { ...A, keepSame: v } })}>When a lead moves to its Day 1 / Day 2 calls, keep it with the same person if they are ticked there too</Check>
-      {QUEUES.map(([k, title, sub]) => {
+      {QUEUES.filter(([k]) => k !== "d3" || dayCount(c, leads) >= 3).map(([k, title, sub]) => {
         const q = A.queues[k], rows = rowsOf(k), act = q.mode === "auto" ? rows.filter((r) => r.on && r.present && r.share > 0) : [], tot = act.reduce((s, r) => s + r.share, 0);
         return (
           <div className="ld-aq" key={k}>

@@ -17,7 +17,7 @@ const Trail = new Schema({ at: Date, type: String, text: String, by: String }, {
 
 const LeadSchema = new Schema(
   {
-    key: { type: String, unique: true }, // the phone number as first imported — one lead per phone
+    key: { type: String, unique: true }, // one lead = one REGISTRATION. First registration: the phone number; a later one by the same person: "<phone>#<timestamp>"
     ts: Date, // when the lead came in
     sheetSeenTs: Date, // the newest sheet row (Timestamp) already applied to this lead: a LATER row for the same phone = the person enquired again
     name: String,
@@ -30,10 +30,11 @@ const LeadSchema = new Schema(
     assignedTo: { type: String, index: true }, // caller name (Lead Qualification)
     assignedBy: String, // how assignedTo was set: "auto" (Settings) | "sheet" (Assigned To column) | "manual" (an admin)
     assignedAt: Date,
-    d1By: String, d2By: String, // how d1Assigned / d2Assigned were set ("auto" | "manual")
+    d1By: String, d2By: String, d3By: String, // how d1Assigned / d2Assigned / d3Assigned were set ("auto" | "manual" | "paste")
     trail: [Trail],
     d1Assigned: String, // optional separate caller for the Day 1 follow-ups
     d2Assigned: String, // ... and Day 2
+    d3Assigned: String, // ... and Day 3 (3-day workshops)
     locked: Boolean, // manually assigned: a sheet re-import never changes the caller
     level: String,
     profession: String,
@@ -55,9 +56,11 @@ const LeadSchema = new Schema(
     waTries: Number, waTriedAt: Date, // failed attempts so far, and when the last one was
     day1: Boolean, // attended Day 1
     day2: Boolean,
+    day3: Boolean, // only for workshops that run 3 days (Settings -> Workshops)
     fus: [Fu], // Lead Qualification follow-ups 1..3
     d1Fus: [Fu], // Day 1 attendee follow-ups
     d2Fus: [Fu], // Day 2 attendee follow-ups
+    d3Fus: [Fu], // Day 3 attendee follow-ups
     source: String, // sheet | manual | sheet-import | booking | razorpay
     sheetDirty: { type: Boolean, index: true }, // Level / Profession / City changed in the app and not yet written back to the Google Sheet
   },

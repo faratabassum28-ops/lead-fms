@@ -53,7 +53,9 @@ export async function syncBookings() {
         const ws = S.cleanWorkshop(cell(r, ix.prog)), via = cell(r, ix.via), now = new Date();
         const what = `${rupees(amount)}${ws ? " · " + ws : ""}${via ? " · via " + via : ""}`;
         const list = (outcome, lead) => LeadBooking.updateOne({ ref }, { $setOnInsert: { ts, name, email, phone: digits, program: ws, amount, via, leadKey: lead.key, outcome } }, { upsert: true });
-        let lead = (await S.byPhone(p10)) || (email ? await S.byEmail(email) : null);
+        // a person who registered for several workshops: the booking goes to the registration of the SAME workshop, else the newest one
+        const regs = [...(await S.byPhoneAll(p10)), ...(email ? await S.byEmailAll(email) : [])];
+        let lead = (ws && regs.find((x) => (x.workshop || "").toLowerCase() === ws.toLowerCase())) || regs[0] || null;
 
         if (lead) {
           if ((lead.bookingRefs || []).includes(ref)) { skipped++; continue; }

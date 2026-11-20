@@ -64,7 +64,7 @@ export function UpdateModal({ m, cfg, leads, admin, onSave, onClose }) {
         <div className="modal-head">
           <div>
             <h3>{l.name}</h3>
-            <p className="modal-sub">{admin ? `Follow-up ${n}` : `Call ${n}`}{set === "d1Fus" ? " · Day 1 attendee" : set === "d2Fus" ? " · Day 2 attendee" : ""}</p>
+            <p className="modal-sub">{admin ? `Follow-up ${n}` : `Call ${n}`}{set === "fus" || !set ? "" : ` · Day ${set[1]} attendee`}</p>
           </div>
           <button type="button" className="modal-x" onClick={onClose} aria-label="Close">×</button>
         </div>

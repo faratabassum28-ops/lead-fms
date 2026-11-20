@@ -25,9 +25,10 @@ const blank = (v) =>
 
 async function findLead(p, known) {
   if (known) { const l = await Lead.findOne({ key: known }); if (l) return l; }
-  if (p.phone) { const l = await S.byPhone(p.phone.slice(-10)); if (l) return l; }
-  if (p.email) { const l = await S.byEmail(p.email); if (l) return l; }
-  return null;
+  // one person can have several registrations: the payment goes to the one for the same workshop, else the newest
+  const ws = S.cleanWorkshop(p.workshop).toLowerCase();
+  const regs = [...(p.phone ? await S.byPhoneAll(p.phone.slice(-10)) : []), ...(p.email ? await S.byEmailAll(p.email) : [])];
+  return (ws && regs.find((x) => (x.workshop || "").toLowerCase() === ws)) || regs[0] || null;
 }
 
 async function apply(p) {
