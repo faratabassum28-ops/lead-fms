@@ -258,7 +258,7 @@ router.post("/attendance", adminOnly, wrap(async (req, res) => {
       const ws = S.cleanWorkshop(b.workshop), ts = new Date(), to = String(p.to || "").trim().slice(0, 80);
       if (d > S.wsInfo(cfg, ws).days) { skipped++; return; }
       const name = String(p.name || "").replace(/\s+/g, " ").trim().slice(0, 80) || (email ? email.split("@")[0] : "Attendee " + phone.slice(-4));
-      const l = new Lead({ key: phone.length >= 10 ? phone : "e:" + email, phone: phone.length >= 10 ? phone : undefined, email: email || undefined, name, workshop: ws, ts, source: "attendance", nameGuess: !String(p.name || "").trim() });
+      const l = new Lead({ key: phone.length >= 10 ? phone : "e:" + email, phone: phone.length >= 10 ? phone : "", email: email || undefined, name, workshop: ws, ts, source: "attendance", nameGuess: !String(p.name || "").trim() });
       S.trail(l, "entered", `Added from the Day ${d} attendance upload by ${req.user.name}`, req.user.name);
       if (to) { l.assignedTo = to; l.assignedBy = "manual"; l.assignedAt = ts; l.locked = true; }
       try {
