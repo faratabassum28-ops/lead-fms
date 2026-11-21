@@ -26,8 +26,8 @@ export default function PasteAttendance({ d, cfg, workshops, workshop, toast, on
   const [loaded, setLoaded] = useState(null); // result of the file / sheet: { label, ...extractEntries() }
   const [ws, setWs] = useState(workshop && !workshop.startsWith("__") ? workshop : "");
   const [check, setCheck] = useState(null), [busy, setBusy] = useState(false), [prog, setProg] = useState(null), [team, setTeam] = useState(null);
-  const [rows, setRows] = useState([]), [keep, setKeep] = useState(false), [showMissing, setShowMissing] = useState(false), [finished, setFinished] = useState(null), [showHelp, setShowHelp] = useState(false);
-  const run = useRef(0), doneIds = useRef(new Set()), fileInput = useRef(null);
+  const [rows, setRows] = useState([]), [keep, setKeep] = useState(false), [showMissing, setShowMissing] = useState(false), [finished, setFinished] = useState(null), [showHelp, setShowHelp] = useState(false), [addNew, setAddNew] = useState(true);
+  const run = useRef(0), doneIds = useRef(new Set()), fileInput = useRef(null), checkRef = useRef(null);
 
   const pasted = useMemo(() => (src === "paste" && text.trim() ? parseText(text) : null), [src, text]);
   const list = src === "paste" ? pasted : loaded;
@@ -37,6 +37,12 @@ export default function PasteAttendance({ d, cfg, workshops, workshop, toast, on
   useEffect(() => { if (workshop && !workshop.startsWith("__")) setWs(workshop); }, [workshop]);
   // a new list / workshop / day means the old check no longer applies (and any check still running is dropped)
   useEffect(() => { run.current++; doneIds.current = new Set(); setCheck(null); setShowMissing(false); setBusy(false); setProg(null); }, [list, ws, d]);
+  // the list is checked by itself as soon as it is loaded (pasted text: a moment after the typing stops) — no extra button
+  useEffect(() => {
+    if (!entries.length) return undefined;
+    const t = setTimeout(() => checkRef.current?.(), src === "paste" ? 800 : 60);
+    return () => clearTimeout(t);
+  }, [list, ws, d]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { api.ldTeam().then(setTeam).catch(() => setTeam([])); }, []);
 
   // people to choose from: everyone with a caller name. Start from what Settings → Automatic assignment says for this day;
@@ -53,7 +59,14 @@ export default function PasteAttendance({ d, cfg, workshops, workshop, toast, on
 
   const edit = (name, patch) => setRows((r) => r.map((x) => (x.name === name ? { ...x, ...patch } : x)));
   const chosen = rows.filter((r) => r.on && r.share > 0);
-  const total = check?.total || 0, counts = dealCounts(total, chosen), sum = chosen.reduce((a, p) => a + p.share, 0);
+  // people in the list who are not registered anywhere yet: every identifier they gave came back "not found"
+  const newPeople = useMemo(() => {
+    if (!check || !list?.people) return [];
+    const miss = new Set(check.missing);
+    return list.people.filter((p) => p.ids.every((i) => miss.has(i)));
+  }, [check, list]);
+  const nNew = addNew ? newPeople.length : 0;
+  const total = (check?.total || 0) + nNew, counts = dealCounts(total, chosen), sum = chosen.reduce((a, p) => a + p.share, 0);
   const countOf = (name) => { const i = chosen.findIndex((p) => p.name === name); return i < 0 ? 0 : counts[i]; };
 
   // ---- loading a list ----
@@ -102,34 +115,42 @@ export default function PasteAttendance({ d, cfg, workshops, workshop, toast, on
     if (my === run.current) { setBusy(false); setProg(null); }
   };
 
+  checkRef.current = doCheck;
+
   // ---- step 3: save (in batches of 300, each lead told exactly which caller it gets) ----
   const doSave = async () => {
     const my = ++run.current;
     setBusy(true);
-    const picked = check.picked, dealable = picked.filter(([, f]) => !(f & 4)).map(([id]) => id);
-    const names = keep ? [] : dealNames(dealable.length, chosen), dealt = {};
-    dealable.forEach((id, i) => { if (names[i]) dealt[id] = names[i]; });
-    const todo = picked.map(([id]) => id).filter((id) => !doneIds.current.has(id)), given = {};
-    let marked = 0, skipped = 0, lost = 0;
-    setProg({ done: picked.length - todo.length, total: picked.length, label: "Saving" });
+    const picked = check.picked, people = addNew ? newPeople : [], grand = picked.length + people.length;
+    // everyone who can be dealt (found people whose calls have not started + all the new people) gets one caller, by the ratio
+    const dealable = picked.filter(([, f]) => !(f & 4)).map(([id]) => id), allKeys = [...dealable, ...people.map((p) => "p:" + p.ids[0])];
+    const names = keep ? [] : dealNames(allKeys.length, chosen), dealt = {};
+    allKeys.forEach((k, i) => { if (names[i]) dealt[k] = names[i]; });
+    const todoIds = picked.map(([id]) => id).filter((id) => !doneIds.current.has(id)), todoNew = people.filter((p) => !doneIds.current.has("p:" + p.ids[0])), given = {};
+    let created = 0, skipped = 0;
+    setProg({ done: doneIds.current.size, total: grand, label: "Saving" });
+    const merge = (r) => { created += r.created || 0; skipped += r.skipped || 0; for (const [k, v] of Object.entries(r.assigned || {})) given[k] = (given[k] || 0) + v; };
     try {
-      for (const part of chunk(todo, SAVE_CHUNK)) {
+      for (const part of chunk(todoIds, SAVE_CHUNK)) {
         const sub = {}; part.forEach((id) => { if (dealt[id]) sub[id] = dealt[id]; });
-        const r = await retry(() => api.ldPasteAttendance({ day: d, ids: part, dealt: sub, keep, workshop: ws }), 4);
+        merge(await retry(() => api.ldPasteAttendance({ day: d, ids: part, dealt: sub, keep, workshop: ws }), 4));
         part.forEach((id) => doneIds.current.add(id));
-        marked += r.marked; skipped += r.skipped || 0; lost += r.notFound || 0;
-        for (const [k, v] of Object.entries(r.assigned || {})) given[k] = (given[k] || 0) + v;
-        setProg({ done: doneIds.current.size, total: picked.length, label: "Saving" });
+        setProg({ done: doneIds.current.size, total: grand, label: "Saving" });
       }
-      const res = { marked: doneIds.current.size - skipped - lost, given, missing: check.missing, notInDays: check.notInDays, day: d };
+      for (const part of chunk(todoNew, 200)) {
+        const create = part.map((p) => ({ name: p.name, phone: p.phone, email: p.email, to: dealt["p:" + p.ids[0]] || "" }));
+        merge(await retry(() => api.ldPasteAttendance({ day: d, create, keep, workshop: ws }), 4));
+        part.forEach((p) => doneIds.current.add("p:" + p.ids[0]));
+        setProg({ done: doneIds.current.size, total: grand, label: "Saving" });
+      }
+      const res = { marked: doneIds.current.size - skipped, created, given, missing: addNew ? [] : check.missing, notInDays: check.notInDays, day: d };
       doneIds.current = new Set();
       const parts = Object.entries(given).map(([n, c]) => `${n} ${n0(c)}`).join(" · ");
-      toast(`Day ${d}: ${n0(res.marked)} marked${parts ? " — " + parts : ""}${res.missing.length ? ` · ${n0(res.missing.length)} not found` : ""}`, res.missing.length ? "default" : "good");
+      toast(`Day ${d}: ${n0(res.marked)} marked${created ? ` (${n0(created)} new)` : ""}${parts ? " — " + parts : ""}`, "good");
       setFinished(res); setText(""); setLoaded(null); setFile(null); setCheck(null);
       await onDone();
     } catch (e) {
-      const left = picked.length - doneIds.current.size;
-      toast(`${e.message}. ${n0(doneIds.current.size)} of ${n0(picked.length)} saved — press the button again to continue with the remaining ${n0(left)}.`, "bad");
+      toast(`${e.message}. ${n0(doneIds.current.size)} of ${n0(grand)} saved — press the button again to continue with the remaining ${n0(grand - doneIds.current.size)}.`, "bad");
     }
     if (my === run.current) { setBusy(false); setProg(null); }
     else setBusy(false);
@@ -137,7 +158,7 @@ export default function PasteAttendance({ d, cfg, workshops, workshop, toast, on
 
   const days = ws ? wsInfo(cfg, ws).days : null;
   const resumed = doneIds.current.size > 0 && !!check;
-  const canGo = !!check && check.total > 0 && (keep || chosen.length > 0) && !busy;
+  const needWs = nNew > 0 && !ws, canGo = !!check && total > 0 && (keep || chosen.length > 0) && !needWs && !busy;
   const sheetOk = /^https:\/\/docs\.google\.com\/spreadsheets\/d\/[\w-]+/.test(sheetUrl.trim());
   const pct = prog && prog.total ? Math.min(100, Math.round((prog.done / prog.total) * 100)) : 0;
 
@@ -194,7 +215,7 @@ export default function PasteAttendance({ d, cfg, workshops, workshop, toast, on
           <option value="">Any workshop — use their newest registration</option>
           {workshops.map((w) => <option key={w.name} value={w.name}>{w.name} · {wsInfo(cfg, w.name).days}-day</option>)}
         </select>
-        <button type="button" className="ld-btn ld-btn-solid" disabled={!entries.length || busy} onClick={doCheck}>{busy && prog?.label === "Checking" ? `Checking… ${pct}%` : "Check →"}</button>
+        <span className="ld-small">{busy && prog?.label === "Checking" ? `Checking… ${pct}%` : entries.length ? "Checked automatically" : "Load a list to start"}</span>
       </div>
       {busy && prog?.label === "Checking" && <div className="ld-prog" aria-label="Checking progress"><i style={{ width: pct + "%" }} /></div>}
       {days && d > days && <div className="ld-callout bad" style={{ marginTop: 8 }}>⚠ {ws} runs only {days} day{days > 1 ? "s" : ""}, so Day {d} attendance can't be marked for it. Change its days in Settings → Workshops.</div>}
@@ -220,25 +241,26 @@ export default function PasteAttendance({ d, cfg, workshops, workshop, toast, on
             <li><b>Upload file</b> — in Google Sheets: File → Download → <i>Comma-separated values (.csv)</i> (or Microsoft Excel .xlsx) → choose it under “Upload file”.</li>
             <li><b>Paste</b> — select the Phone column in the sheet, copy, paste into the box.</li>
           </ol>
-          <b>Then</b> press <i>Check →</i> to see who was found, choose callers &amp; ratio in Step 2, and press the last button to save. Nothing is saved before that.
+          <b>Then</b> the list is checked automatically. Choose the callers &amp; ratio in Step 2 and press <i>Submit</i>. People who are not registered yet are added as new attendees (tick the option to turn this off). Nothing is saved before you press Submit.
         </div>
       )}
 
       {finished && !check && (
         <div className="ld-callout good" style={{ marginTop: 12 }}>
-          ✔ Day {finished.day}: <b>{n0(finished.marked)}</b> marked as attended{Object.keys(finished.given).length ? <> — {Object.entries(finished.given).map(([n, c]) => `${n} ${n0(c)}`).join(" · ")}</> : ""}.
+          ✔ Day {finished.day}: <b>{n0(finished.marked)}</b> marked as attended{finished.created > 0 ? <> ({n0(finished.created)} new)</> : ""}{Object.keys(finished.given).length ? <> — {Object.entries(finished.given).map(([n, c]) => `${n} ${n0(c)}`).join(" · ")}</> : ""}.
           {finished.missing.length > 0 && <> {n0(finished.missing.length)} not found <button type="button" className="link-btn" onClick={() => downloadCsv(`day${finished.day}-not-found.csv`, [["Phone / Email not found"], ...finished.missing.map((x) => [x])])}>⬇ download list</button></>}
         </div>
       )}
 
       {check && (
         <div className="ld-paste-result">
-          <div className="ld-paste-head"><b>Check result</b></div>
+          <div className="ld-paste-head"><b>Result</b></div>
           <div className="ld-chips-row">
-            <span className="ld-pill ld-pill-done">✔ {n0(check.total)} found</span>
+            <span className="ld-pill ld-pill-done">✔ {n0(check.total)} already registered</span>
             {check.newly !== check.total && <span className="ld-pill ld-pill-wait">{n0(check.already)} already marked</span>}
             {check.other > 0 && <span className="ld-pill ld-pill-wait" title="Registered for a different workshop than the one picked — marked on their newest registration">{n0(check.other)} from another workshop</span>}
-            {check.missing.length > 0 && <button type="button" className="ld-pill ld-pill-over ld-pillbtn" onClick={() => setShowMissing((v) => !v)}>{n0(check.missing.length)} not found {showMissing ? "▴" : "▾"}</button>}
+            {newPeople.length > 0 && <span className={"ld-pill " + (addNew ? "ld-pill-done" : "ld-pill-over")}>{n0(newPeople.length)} new {addNew ? "— will be added" : "— not registered, skipped"}</span>}
+            {check.missing.length > 0 && <button type="button" className="ld-pill ld-pill-wait ld-pillbtn" onClick={() => setShowMissing((v) => !v)}>{n0(check.missing.length)} numbers / emails not in the system {showMissing ? "▴" : "▾"}</button>}
             {check.notInDays.length > 0 && <span className="ld-pill ld-pill-over">{n0(check.notInDays.length)} skipped — workshop has no Day {d}</span>}
           </div>
           {showMissing && (
@@ -247,10 +269,17 @@ export default function PasteAttendance({ d, cfg, workshops, workshop, toast, on
           )}
           {check.notInDays.length > 0 && <p className="ld-small ld-missing">{check.notInDays.slice(0, 6).join(" · ")}{check.notInDays.length > 6 ? ` +${n0(check.notInDays.length - 6)} more` : ""}</p>}
 
-          {check.total > 0 && (
+          {newPeople.length > 0 && (
+            <>
+              <label className="ld-check" style={{ marginTop: 8 }}><input type="checkbox" checked={addNew} onChange={(e) => setAddNew(e.target.checked)} /> Add the {n0(newPeople.length)} people who are not registered yet as new Day {d} attendees (they go to Attendee follow-ups only)</label>
+              {needWs && <div className="ld-callout bad" style={{ marginTop: 6 }}>⚠ Choose the workshop above first — new attendees are added under it.</div>}
+            </>
+          )}
+
+          {total > 0 && (
             <>
               <div className="ld-paste-head" style={{ marginTop: 14 }}>
-                <b>Step 2 · Who should call these {n0(check.total)} people?</b>
+                <b>Step 2 · Who should call these {n0(total)} people?</b>
                 <span className="ld-small">Share = ratio (2 gets twice as many as 1)</span>
               </div>
               <label className="ld-check"><input type="checkbox" checked={keep} onChange={(e) => setKeep(e.target.checked)} /> Don't change callers — each person stays with the caller who already has them</label>
@@ -293,9 +322,8 @@ export default function PasteAttendance({ d, cfg, workshops, workshop, toast, on
           )}
           <div className="ld-actions" style={{ marginTop: 12 }}>
             <button type="button" className="ld-btn ld-btn-solid" disabled={!canGo} onClick={doSave}>
-              {busy && prog?.label === "Saving" ? `Saving… ${pct}%` : resumed ? `Continue saving (${n0(check.total - doneIds.current.size)} left)` : `Mark ${n0(check.total)} as Day ${d} attendees${keep ? "" : " & assign"}`}
+              {busy && prog?.label === "Saving" ? `Saving… ${pct}%` : resumed ? `Continue saving (${n0(total - doneIds.current.size)} left)` : `Submit · mark ${n0(total)} as Day ${d} attendees${keep ? "" : " & assign"}`}
             </button>
-            <button type="button" className="ld-btn" disabled={busy} onClick={() => { doneIds.current = new Set(); setCheck(null); }}>Back</button>
           </div>
           {busy && prog?.label === "Saving" && (
             <>

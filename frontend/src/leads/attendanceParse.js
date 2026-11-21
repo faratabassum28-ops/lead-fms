@@ -54,26 +54,37 @@ function fromCell(raw, out, bad, asColumn) {
 
 const PHONE_H = /phone|mobile|contact|whats\s?app|cell|number|\bno\.?\b|मोबाइल/i;
 const EMAIL_H = /e-?mail|mail\s?id/i;
+const NAME_H = /name|student|participant|attendee|नाम/i;
 const looksLikeData = (x) => isEmail(String(x).trim()) || String(x).replace(/\D/g, "").length >= 10;
 
-// rows: array of arrays. Finds a header row (Phone / Email columns) and reads just those columns; with no header every cell is scanned.
+// rows: array of arrays. Finds a header row (Phone / Email / Name columns) and reads just those columns; with no header every cell is scanned.
+// people = one per row: { phone, email, name, ids } — so a person given by phone AND email in one row is one person, not two.
 export function extractEntries(rows) {
-  const out = [], bad = { short: [], sci: [] };
-  let hi = -1, pc = [], ec = [], names = { phone: [], email: [] };
+  const out = [], bad = { short: [], sci: [] }, people = [], owner = new Map();
+  let hi = -1, pc = [], ec = [], nc = [], names = { phone: [], email: [] };
   for (let i = 0; i < Math.min(rows.length, 8) && hi < 0; i++) {
     const r = rows[i];
     if (r.some(looksLikeData)) break; // real data already: there is no header
-    r.forEach((h, j) => { const x = String(h || "").trim(); if (EMAIL_H.test(x)) { ec.push(j); names.email.push(x); } else if (PHONE_H.test(x)) { pc.push(j); names.phone.push(x); } });
-    if (pc.length || ec.length) hi = i; else { pc = []; ec = []; names = { phone: [], email: [] }; }
+    r.forEach((h, j) => { const x = String(h || "").trim(); if (EMAIL_H.test(x)) { ec.push(j); names.email.push(x); } else if (PHONE_H.test(x)) { pc.push(j); names.phone.push(x); } else if (NAME_H.test(x)) nc.push(j); });
+    if (pc.length || ec.length) hi = i; else { pc = []; ec = []; nc = []; names = { phone: [], email: [] }; }
   }
   const hadHeader = hi >= 0, body = hadHeader ? rows.slice(hi + 1) : rows;
+  const addPerson = (vals, name) => {
+    if (!vals.length || vals.some((v) => owner.has(v))) return; // already have this person (same number / email seen before)
+    const p = { ids: [...new Set(vals)], name: name || "" };
+    p.phone = p.ids.find((x) => !isEmail(x)) || ""; p.email = p.ids.find(isEmail) || "";
+    p.ids.forEach((v) => owner.set(v, p)); people.push(p);
+  };
   for (const r of body) {
-    if (hadHeader) { for (const j of pc) fromCell(r[j], out, bad, true); for (const j of ec) fromCell(r[j], out, bad, true); }
-    else for (const c of r) fromCell(c, out, bad, false);
+    const row = [];
+    if (hadHeader) { for (const j of pc) fromCell(r[j], row, bad, true); for (const j of ec) fromCell(r[j], row, bad, true); }
+    else { for (const c of r) { const one = []; fromCell(c, one, bad, false); one.forEach((v) => addPerson([v], "")); row.push(...one); } }
+    out.push(...row);
+    if (hadHeader) addPerson(row, nc.map((j) => String(r[j] ?? "").trim()).find(Boolean) || "");
   }
   const seen = new Set(), entries = [];
   for (const e of out) { if (!seen.has(e)) { seen.add(e); entries.push(e); } }
-  return { entries, found: out.length, dupes: out.length - entries.length, invalid: bad.short, sci: bad.sci, hadHeader, columns: names, rowCount: body.length };
+  return { entries, people, found: out.length, dupes: out.length - entries.length, invalid: bad.short, sci: bad.sci, hadHeader, columns: names, rowCount: body.length };
 }
 
 export const parseText = (text) => extractEntries(parseDelimited(text));
