@@ -62,7 +62,8 @@ export const TODAY_BUCKETS = [["now", "Due now"], ["later", "Later today"]];
 export const bucketOf = (t, now, delayed) => (delayed ? (DELAY_BUCKETS.find(([, , fn]) => fn(daysAgo(t.f.planned, now))) || DELAY_BUCKETS[3])[0] : new Date(t.f.planned) <= now ? "now" : "later");
 export const shortDate = (d) => new Date(d).toLocaleDateString("en-IN", { day: "numeric", month: "short" });
 
-export const wa = (p, t = "") => "https://wa.me/" + (p.length === 10 ? "91" + p : p) + (t ? "?text=" + encodeURIComponent(t) : "");
+// a lead can have only an email (no phone): never crash on it
+export const wa = (p, t = "") => { const n = String(p || "").replace(/\D/g, ""); return "https://wa.me/" + (n.length === 10 ? "91" + n : n) + (t ? "?text=" + encodeURIComponent(t) : ""); };
 export const waText = (l, cfg) => (cfg?.waTemplate || "").replace("{name}", l.name || "").replace("{caller}", l.assignedTo || "");
 
 export const pc = (a, b) => (b ? Math.round((a / b) * 100) + "%" : "—");
