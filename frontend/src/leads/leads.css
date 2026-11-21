@@ -442,3 +442,11 @@ body .shortcuts-wrap .shortcuts-panel { left: auto; right: 0; }
 .ld-wstable td { vertical-align: middle; }
 .ld-wsdefault td { background: var(--panel-alt, transparent); }
 @media (max-width: 640px) { .ld-deal-row { grid-template-columns: 1fr auto; } .ld-deal-bar { grid-column: 1 / -1; } .ld-deal-n { text-align: left; } }
+
+/* attendance upload: file drop, source summary, progress bar, how-to */
+.ld-drop { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; padding: 18px 14px; border: 1.5px dashed var(--line); border-radius: var(--radius-sm); }
+.ld-src-sum { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.ld-prog { height: 6px; margin-top: 8px; border-radius: 99px; background: var(--line); overflow: hidden; }
+.ld-prog > i { display: block; height: 100%; background: var(--accent); transition: width .25s ease; }
+.ld-howto { margin-top: 8px; padding: 10px 14px; border: 1px solid var(--line); border-radius: var(--radius-sm); font-size: 13.5px; line-height: 1.5; }
+.ld-howto ul, .ld-howto ol { margin: 4px 0 10px; padding-left: 20px; }

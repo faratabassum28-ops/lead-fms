@@ -94,6 +94,36 @@ export const normEmail = (e) => String(e || "").trim().toLowerCase();
 export const isEmail = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normEmail(e));
 export const byEmail = (e) => Lead.findOne({ emailKey: normEmail(e) }).sort({ ts: -1 });
 export const byEmailAll = (e) => Lead.find({ emailKey: normEmail(e) }).sort({ ts: -1 });
+
+// Bulk lookup for the attendance upload: ONE query for every phone / email in a chunk instead of one query per person.
+// Returns { byPhone: Map(last10 -> [leads newest first]), byEmail: Map(email -> [leads newest first]) }
+export async function regsForEntries(entries) {
+  const phones = new Set(), emails = new Set();
+  for (const e of entries) {
+    if (isEmail(e)) emails.add(normEmail(e));
+    else { const n = String(e).replace(/\D/g, "").slice(-10); if (n.length >= 10) phones.add(n); }
+  }
+  const or = [];
+  if (phones.size) {
+    const list = [...phones];
+    or.push({ phone10: { $in: list } }, { key: { $in: [...list, ...list.map((n) => "91" + n)] } });
+  }
+  if (emails.size) or.push({ emailKey: { $in: [...emails] } });
+  const byPhone = new Map(), byEmail = new Map();
+  if (!or.length) return { byPhone, byEmail };
+  const leads = await Lead.find({ $or: or }).sort({ ts: -1 });
+  const add = (m, k, l) => { if (!k) return; const a = m.get(k); if (!a) m.set(k, [l]); else if (!a.includes(l)) a.push(l); };
+  for (const l of leads) {
+    const k10 = String(l.phone10 || l.phone || "").replace(/\D/g, "").slice(-10);
+    add(byPhone, k10, l);
+    // old rows whose phone10 is not filled in yet: their key still carries the number
+    const kk = String(l.key || "").split("#")[0].replace(/\D/g, "").slice(-10);
+    if (kk !== k10) add(byPhone, kk, l);
+    add(byEmail, l.emailKey, l);
+  }
+  return { byPhone, byEmail };
+}
+
 // older leads were saved before emailKey existed — fill it in once (cheap no-op afterwards)
 // (new leads always get it from the save hook, so once per server start is enough — not on every 1-minute import)
 let emailKeysDone = false;
@@ -222,12 +252,12 @@ export const planLen = (cfg, set) => (set === "fus" ? cfg.plan : cfg.attPlan)?.l
 // ---------------------------------------------------------------------------
 // The ONE intake sheet (Google Sheet shared as "Anyone with the link: Viewer")
 // ---------------------------------------------------------------------------
-const csvUrl = (u) => {
+export const csvUrl = (u) => {
   const id = u.match(/\/d\/([\w-]+)/)?.[1];
   if (!id) throw new Error("Invalid sheet link");
   return `https://docs.google.com/spreadsheets/d/${id}/export?format=csv&gid=${u.match(/gid=(\d+)/)?.[1] || "0"}`;
 };
-function parseCsv(t) {
+export function parseCsv(t) {
   const rows = []; let r = [], c = "", q = false;
   for (let i = 0; i < t.length; i++) {
     const ch = t[i];

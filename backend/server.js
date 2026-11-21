@@ -19,7 +19,7 @@ const app = express();
 const allowedOrigins = process.env.FRONTEND_URL ? process.env.FRONTEND_URL.split(",").map((s) => s.trim()) : null;
 app.use(cors({ origin: allowedOrigins || true }));
 // Keep the exact bytes of Razorpay webhooks: the signature is computed over the raw body, not over parsed JSON.
-app.use(express.json({ limit: "1mb", verify: (req, _res, buf) => { if (req.originalUrl.startsWith("/api/intake")) req.rawBody = buf; } }));
+app.use(express.json({ limit: "10mb", verify: (req, _res, buf) => { if (req.originalUrl.startsWith("/api/intake")) req.rawBody = buf; } }));
 // Gzip every response — the Leads list is thousands of rows of JSON.
 app.use(compression({ threshold: 1024 }));
 

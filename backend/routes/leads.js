@@ -223,13 +223,43 @@ router.patch("/leads/:id/fu/:n", wrap(async (req, res) => {
 router.post("/attendance", adminOnly, wrap(async (req, res) => {
   const b = req.body || {}, d = S.DAYS.includes(+b.day) ? +b.day : 1, cfg = await S.getCfg();
   const want = S.cleanWorkshop(b.workshop).toLowerCase(), set = "d" + d + "Fus";
+
+  // ---- COMMIT a chunk of already-checked leads (the page sends big lists 300 at a time, with the exact caller for each) ----
+  if (!b.dryRun && Array.isArray(b.ids)) {
+    const ids = [...new Set(b.ids.map(String).filter((x) => mongoose.isValidObjectId(x)))].slice(0, 1000);
+    const dealt = b.dealt && typeof b.dealt === "object" ? b.dealt : {};
+    const leads = await Lead.find({ _id: { $in: ids } }), A = await S.assigner("d" + d, cfg), given = {};
+    let marked = 0, skipped = 0;
+    const one = async (l) => {
+      if (d > S.wsInfo(cfg, l.workshop).days) { skipped++; return; }
+      if (!l["day" + d]) S.trail(l, "attendance", `Marked present on Day ${d}`, req.user.name);
+      l["day" + d] = true;
+      if (!(l[set] || []).length) l[set] = S.attFus(cfg, l.workshop);
+      const to = String(dealt[String(l._id)] || "").trim().slice(0, 80);
+      if (to) {
+        if (to.toLowerCase() !== (l[`d${d}Assigned`] || "").toLowerCase()) S.trail(l, "assign", `Day ${d} calls assigned to ${to} (shared by ratio when attendance was uploaded)`, req.user.name);
+        l[`d${d}Assigned`] = to; l[`d${d}By`] = "paste"; given[to] = (given[to] || 0) + 1;
+      } else if (b.keep) S.autoAssignDay(l, d, A); // "keep callers": only fill a caller where there is none yet, by Settings
+      await l.save(); marked++;
+    };
+    // saves run a few at a time: much faster than one by one, gentle enough for the database
+    for (let i = 0; i < leads.length; i += 15) await Promise.all(leads.slice(i, i + 15).map(one));
+    await A.save();
+    S.bustProgress();
+    return res.json({ marked, skipped, assigned: given, notFound: ids.length - leads.length });
+  }
+
+  // ---- CHECK / MARK a list of phones and emails ----
   const entries = [...new Set([...(b.entries || []), ...(b.phones || [])].map((x) => String(x).trim()).filter(Boolean))];
+  if (entries.length > 5000 && !Array.isArray(b.ids)) throw fail("Send at most 5,000 numbers per request (the page does this for you)");
+  const { byPhone, byEmail } = await S.regsForEntries(entries);
   const picked = [], missing = [], notInDays = [], seen = new Set();
   let other = 0, already = 0;
+  const flags = [];
   for (const e of entries) {
     const n = e.replace(/\D/g, "").slice(-10);
     // an email is matched on the email; anything else on the phone number
-    const regs = S.isEmail(e) ? await S.byEmailAll(e) : n.length >= 10 ? await S.byPhoneAll(n) : [];
+    const regs = S.isEmail(e) ? byEmail.get(S.normEmail(e)) || [] : n.length >= 10 ? byPhone.get(n) || [] : [];
     if (!regs.length) { missing.push(e); continue; }
     let l = want ? regs.find((x) => (x.workshop || "").toLowerCase() === want) : null;
     const fallback = !!want && !l;
@@ -241,21 +271,23 @@ router.post("/attendance", adminOnly, wrap(async (req, res) => {
     if (fallback) other++;
     if (l["day" + d]) already++;
     picked.push(l);
+    flags.push([String(l._id), (l["day" + d] ? 1 : 0) | (fallback ? 2 : 0) | ((l[set] || []).some((f) => f.actual) ? 4 : 0)]);
   }
   const summary = { total: picked.length, already, newly: picked.length - already, other, missing, notInDays };
-  if (b.dryRun) return res.json({ dryRun: true, ...summary });
+  // flags: 1 = already marked, 2 = from another workshop than the one picked, 4 = calls already started (stays with that caller)
+  if (b.dryRun) return res.json({ dryRun: true, ...summary, picked: flags });
 
+  // old one-shot way (small pastes, API users): mark everything found right now
   const people = b.assign ? S.cleanDealPeople(b.assign.people) : [];
   if (b.assign && !people.length) throw fail("Tick at least one person to share the calls with — or choose “keep with each lead's own caller”");
-  // calls nobody has made yet can be re-dealt; a lead whose Day calls were already started stays with that caller
   const dealable = people.length ? picked.filter((l) => !(l[set] || []).some((f) => f.actual)) : [];
-  const deal = S.dealByRatio(dealable.length, people), dealt = new Map(dealable.map((l, i) => [String(l._id), deal[i]])), given = {};
+  const deal = S.dealByRatio(dealable.length, people), dealtTo = new Map(dealable.map((l, i) => [String(l._id), deal[i]])), given = {};
   const A = await S.assigner("d" + d, cfg);
   for (const l of picked) {
     if (!l["day" + d]) S.trail(l, "attendance", `Marked present on Day ${d}`, req.user.name);
     l["day" + d] = true;
     if (!l[set].length) l[set] = S.attFus(cfg, l.workshop);
-    const to = dealt.get(String(l._id));
+    const to = dealtTo.get(String(l._id));
     if (to) {
       if (to.toLowerCase() !== (l[`d${d}Assigned`] || "").toLowerCase()) S.trail(l, "assign", `Day ${d} calls assigned to ${to} (shared by ratio when attendance was pasted)`, req.user.name);
       l[`d${d}Assigned`] = to; l[`d${d}By`] = "paste"; given[to] = (given[to] || 0) + 1;
@@ -265,6 +297,25 @@ router.post("/attendance", adminOnly, wrap(async (req, res) => {
   await A.save();
   S.bustProgress();
   res.json({ ...summary, marked: picked.length, assigned: given });
+}));
+
+// Read a Google Sheet (shared "Anyone with the link: Viewer") and send its rows back, so a list of thousands of attendees
+// never has to be copied by hand. The page picks the phone / email columns out of the rows.
+router.post("/attendance/sheet", adminOnly, wrap(async (req, res) => {
+  const url = String(req.body?.url || "").trim();
+  if (!/^https:\/\/docs\.google\.com\/spreadsheets\/d\/[\w-]+/.test(url)) throw fail("That does not look like a Google Sheet link. Open the sheet, click Share → copy link, and paste it here.");
+  const ctrl = new AbortController(), timer = setTimeout(() => ctrl.abort(), 45_000);
+  let txt, ok, status;
+  try {
+    const r = await fetch(S.csvUrl(url), { redirect: "follow", signal: ctrl.signal });
+    ok = r.ok; status = r.status; txt = await r.text();
+  } catch (e) {
+    throw fail(e?.name === "AbortError" ? "Google took too long to answer. Try again, or download the sheet as CSV and upload the file." : "Could not reach Google Sheets. Try again, or download the sheet as CSV and upload the file.");
+  } finally { clearTimeout(timer); }
+  if (!ok || /^\s*<(!doctype|html)/i.test(txt)) throw fail(status === 404 ? "Sheet not found — check the link." : "Cannot read this sheet. Click Share → General access → “Anyone with the link” (Viewer), then try again. Or download it as CSV and upload the file.");
+  const rows = S.parseCsv(txt);
+  if (rows.length > 200000) throw fail("This sheet has more than 200,000 rows — split it in smaller sheets.");
+  res.json({ rows });
 }));
 
 // ---------- history ----------
