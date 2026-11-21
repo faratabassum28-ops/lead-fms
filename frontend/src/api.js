@@ -102,6 +102,7 @@ export const api = {
   ldBookingTest: (data) => request("/booking-test", { method: "POST", body: JSON.stringify(data) }),
   ldMarkAttendance: (day, entries) => request("/attendance", { method: "POST", body: JSON.stringify({ day, entries }) }), // phone numbers and/or emails
   ldPasteAttendance: (body) => request("/attendance", { method: "POST", body: JSON.stringify(body) }), // { day, entries, workshop, dryRun, assign: { people: [{ name, share }] } }
+  ldAttendanceSheet: (url) => request("/attendance/sheet", { method: "POST", body: JSON.stringify({ url }) }), // { rows } of a Google Sheet shared as "Anyone with the link"
   ldImportLog: () => request("/import-log"),
   ldBookings: () => request("/bookings"), // bookings from the New Order FMS sheet
   ldPayments: () => request("/payments"), // Razorpay payments (admin)
