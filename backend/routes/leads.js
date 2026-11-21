@@ -224,29 +224,53 @@ router.post("/attendance", adminOnly, wrap(async (req, res) => {
   const b = req.body || {}, d = S.DAYS.includes(+b.day) ? +b.day : 1, cfg = await S.getCfg();
   const want = S.cleanWorkshop(b.workshop).toLowerCase(), set = "d" + d + "Fus";
 
-  // ---- COMMIT a chunk of already-checked leads (the page sends big lists 300 at a time, with the exact caller for each) ----
-  if (!b.dryRun && Array.isArray(b.ids)) {
-    const ids = [...new Set(b.ids.map(String).filter((x) => mongoose.isValidObjectId(x)))].slice(0, 1000);
+  // ---- COMMIT a chunk: leads that were found (ids) and/or people who are not in the system yet (create) ----
+  if (!b.dryRun && (Array.isArray(b.ids) || Array.isArray(b.create))) {
+    const ids = [...new Set((b.ids || []).map(String).filter((x) => mongoose.isValidObjectId(x)))].slice(0, 1000);
     const dealt = b.dealt && typeof b.dealt === "object" ? b.dealt : {};
-    const leads = await Lead.find({ _id: { $in: ids } }), A = await S.assigner("d" + d, cfg), given = {};
-    let marked = 0, skipped = 0;
-    const one = async (l) => {
-      if (d > S.wsInfo(cfg, l.workshop).days) { skipped++; return; }
+    const leads = ids.length ? await Lead.find({ _id: { $in: ids } }) : [], A = await S.assigner("d" + d, cfg), given = {};
+    let marked = 0, skipped = 0, created = 0;
+    const apply = async (l, toRaw, how) => {
+      if (d > S.wsInfo(cfg, l.workshop).days) { skipped++; return false; }
       if (!l["day" + d]) S.trail(l, "attendance", `Marked present on Day ${d}`, req.user.name);
       l["day" + d] = true;
       if (!(l[set] || []).length) l[set] = S.attFus(cfg, l.workshop);
-      const to = String(dealt[String(l._id)] || "").trim().slice(0, 80);
+      const to = String(toRaw || "").trim().slice(0, 80);
       if (to) {
         if (to.toLowerCase() !== (l[`d${d}Assigned`] || "").toLowerCase()) S.trail(l, "assign", `Day ${d} calls assigned to ${to} (shared by ratio when attendance was uploaded)`, req.user.name);
         l[`d${d}Assigned`] = to; l[`d${d}By`] = "paste"; given[to] = (given[to] || 0) + 1;
       } else if (b.keep) S.autoAssignDay(l, d, A); // "keep callers": only fill a caller where there is none yet, by Settings
       await l.save(); marked++;
+      return true;
     };
+    const one = (l) => apply(l, dealt[String(l._id)]);
     // saves run a few at a time: much faster than one by one, gentle enough for the database
     for (let i = 0; i < leads.length; i += 15) await Promise.all(leads.slice(i, i + 15).map(one));
+
+    // people who were not registered: they become attendees of this workshop (Attendee follow-ups only — never Today's follow-ups)
+    const make = async (p) => {
+      const phone = String(p?.phone || "").replace(/\D/g, "").slice(-10), email = S.isEmail(p?.email || "") ? S.normEmail(p.email) : "";
+      if (phone.length < 10 && !email) return;
+      // it may have been added by an earlier batch / another admin a moment ago: then just mark that one
+      const { byPhone, byEmail } = await S.regsForEntries([phone.length >= 10 ? phone : null, email || null].filter(Boolean));
+      const hit = (phone.length >= 10 && byPhone.get(phone)?.[0]) || (email && byEmail.get(email)?.[0]);
+      if (hit) { await apply(hit, p.to); return; }
+      const ws = S.cleanWorkshop(b.workshop), ts = new Date(), to = String(p.to || "").trim().slice(0, 80);
+      if (d > S.wsInfo(cfg, ws).days) { skipped++; return; }
+      const name = String(p.name || "").replace(/\s+/g, " ").trim().slice(0, 80) || (email ? email.split("@")[0] : "Attendee " + phone.slice(-4));
+      const l = new Lead({ key: phone.length >= 10 ? phone : "e:" + email, phone: phone.length >= 10 ? phone : undefined, email: email || undefined, name, workshop: ws, ts, source: "attendance", nameGuess: !String(p.name || "").trim() });
+      S.trail(l, "entered", `Added from the Day ${d} attendance upload by ${req.user.name}`, req.user.name);
+      if (to) { l.assignedTo = to; l.assignedBy = "manual"; l.assignedAt = ts; l.locked = true; }
+      try {
+        if (await apply(l, to)) created++;
+      } catch (e) { if (e.code === 11000) skipped++; else throw e; }
+    };
+    const create = (Array.isArray(b.create) ? b.create : []).slice(0, 500);
+    for (let i = 0; i < create.length; i += 10) await Promise.all(create.slice(i, i + 10).map(make));
+
     await A.save();
     S.bustProgress();
-    return res.json({ marked, skipped, assigned: given, notFound: ids.length - leads.length });
+    return res.json({ marked, created, skipped, assigned: given, notFound: ids.length - leads.length });
   }
 
   // ---- CHECK / MARK a list of phones and emails ----
