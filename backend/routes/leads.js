@@ -195,7 +195,11 @@ router.patch("/leads/:id/fu/:n", wrap(async (req, res) => {
   f.callbackAt = b.callbackAt ? new Date(b.callbackAt) : undefined;
   f.actual = b.status ? new Date() : undefined;
   const later = arr.slice(n), nx = arr[n];
-  if (cfg.closeStatuses.includes(f.status)) later.forEach((x) => { if (!x.actual) x.skipped = true; }); // AUTO-CLOSE
+  // AUTO-CLOSE: "Connected" always ends the CURRENT follow-up track (Lead FU1-3, or Day 1 / Day 2 / Day 3 FU1-3) — the person
+  // is reached, so no further FU of that same track is shown or called. The other tracks (the attendee FU1 / FU2 / FU3 of
+  // Day 1 / 2 / 3) are separate arrays and are not touched: the lead still enters them as usual. If the caller later
+  // corrects the status to something else, the closed steps re-open (the else-branch below).
+  if (f.status === "Connected" || cfg.closeStatuses.includes(f.status)) later.forEach((x) => { if (!x.actual) x.skipped = true; });
   else {
     later.forEach((x) => { x.skipped = false; });
     if (cfg.retryStatuses.includes(f.status) && nx && !nx.actual) { // AUTO-RETRY
